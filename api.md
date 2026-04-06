@@ -197,14 +197,61 @@ Body: `AppointmentBookingRequestDto`
 - `date`: string/date
 - `specialty`: string (optional)
 - `timeSlotId`: string
-- `doctor`: { `id`, `name`, `email` } (required by saga)
+- `doctor`: { `id`, `name`, `email` } (doctor id required)
 - `serviceType`: enum
 - `paymentMethod`: enum
 - `amount`: number (optional)
 - `reasonForAppointment`: string (optional)
 - `coinsToUse`: number (optional)
 - `useCoin`: boolean (optional)
-Response: booking status (pending)
+Core flow:
+- Validate request
+- Acquire Redis slot lock `SET slot:{doctorId}:{timeSlotId} NX EX 300`
+- Create appointment with `PENDING`
+- Process payment synchronously by payment method
+- If payment success -> set `CONFIRMED`
+- If payment fails -> set `FAILED` and release slot lock/slot
+
+Response examples:
+1. Slot locked by another booking
+```json
+{ "code": "ERROR", "message": "Slot already booked", "data": null }
+```
+
+2. ONLINE payment: create pending booking + payment url
+```json
+{
+  "code": "PENDING",
+  "message": "Appointment created. Complete payment to confirm booking.",
+  "data": {
+    "appointmentId": "<appointmentId>",
+    "paymentUrl": "https://..."
+  }
+}
+```
+
+3. COIN payment success
+```json
+{
+  "code": "SUCCESS",
+  "message": "Deducted ... coins successfully",
+  "data": { "appointmentId": "<appointmentId>" }
+}
+```
+
+4. Payment/booking failed
+```json
+{
+  "code": "ERROR",
+  "message": "...",
+  "data": { "appointmentId": "<appointmentId>" }
+}
+```
+
+Notes:
+- Redis is used only for race-condition protection (TTL 5 minutes).
+- A background cleanup marks expired `PENDING` bookings as `FAILED` after 5 minutes.
+- Database also enforces uniqueness for active bookings on `(doctorId, timeSlot)` where status is `PENDING|CONFIRMED`.
 
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.
@@ -538,6 +585,28 @@ Response: `{ "paymentUrl": "..." }`
 Description: VNPay return handler.
 Auth: Public
 Query: VNPay return params
+Behavior:
+- Verify VNPay signature and response code.
+- If success: confirm appointment (`PENDING` -> `CONFIRMED`).
+- If failed: mark appointment as `FAILED`.
+
+Response (success callback):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Payment successful",
+  "data": { "appointmentId": "<appointmentId>" }
+}
+```
+
+Response (failed callback):
+```json
+{
+  "code": "ERROR",
+  "message": "Payment failed",
+  "data": { "appointmentId": "<appointmentId>" }
+}
+```
 
 ## System
 
@@ -550,6 +619,10 @@ Response: string
 
 - `patientId` and `email` are no longer accepted from request body/query for multiple endpoints.
 - User identity is derived from JWT (`req.user`), including `accountId`, `patientId`, `doctorId`, and `email`.
+- Appointment booking core flow is now synchronous in `AppointmentBookingService` (no saga/event chaining for core state transitions).
+- New booking status: `FAILED`.
+- Booking now uses Redis slot lock key `slot:{doctorId}:{timeSlotId}` with TTL 300s.
+- Expired `PENDING` bookings are auto-marked `FAILED` after 5 minutes.
 - Routes changed:
   - `GET /appointment/completed/doctor/:doctorId` ? `GET /appointment/completed/doctor`
   - `GET /appointment/today?doctorId=...` ? `GET /appointment/today`
