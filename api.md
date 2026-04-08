@@ -587,26 +587,34 @@ Auth: Public
 Query: VNPay return params
 Behavior:
 - Verify VNPay signature and response code.
-- If success: confirm appointment (`PENDING` -> `CONFIRMED`).
-- If failed: mark appointment as `FAILED`.
+- Process result idempotently (duplicate callbacks do not double-update).
+- If success (`vnp_ResponseCode=00` and `vnp_TransactionStatus=00`): finalize payment as `COMPLETED` and confirm appointment.
+- If failed or checksum invalid: finalize payment as `FAILED`.
+- Convert `vnp_PayDate` (VNPay GMT+7 format `yyyyMMddHHmmss`) to UTC before persisting.
+- Emit best-effort real-time event `payment:update` with payload `{ orderId, status }`.
+- Redirect user to frontend result page.
 
-Response (success callback):
+Response:
+- No JSON body.
+- HTTP redirect to:
+  - `${FRONTEND_URL}/payment-result?orderId=<orderId>&status=COMPLETED|FAILED&code=<vnp_ResponseCode>`
+
+### GET /payment/:orderId
+Description: Get payment status by order/appointment id.
+Auth: Public
+Response:
 ```json
 {
-  "code": "SUCCESS",
-  "message": "Payment successful",
-  "data": { "appointmentId": "<appointmentId>" }
+  "orderId": "string",
+  "status": "PENDING | COMPLETED | FAILED",
+  "amount": 100000,
+  "paidAt": "2026-04-08T01:23:45.000Z"
 }
 ```
 
-Response (failed callback):
-```json
-{
-  "code": "ERROR",
-  "message": "Payment failed",
-  "data": { "appointmentId": "<appointmentId>" }
-}
-```
+Notes:
+- `paidAt` can be `null` for unpaid/failed records.
+- `orderId` maps to appointment id (`vnp_TxnRef`).
 
 ## System
 
