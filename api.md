@@ -207,8 +207,10 @@ Body: `AppointmentBookingRequestDto`
 Core flow:
 - Validate request
 - Acquire Redis slot lock `SET slot:{doctorId}:{timeSlotId} NX EX 300`
-- Create appointment with `PENDING`
+- Pre-check slot in database for same `(doctorId, date, timeSlot)` with status in `PENDING|CONFIRMED`
+- Create appointment with `PENDING` and mark timeslot `booked` in a MongoDB transaction
 - Process payment synchronously by payment method
+- For online payment, create an idempotent payment record per appointment before generating payment URL
 - If payment success -> set `CONFIRMED`
 - If payment fails -> set `FAILED` and release slot lock/slot
 
@@ -251,7 +253,9 @@ Response examples:
 Notes:
 - Redis is used only for race-condition protection (TTL 5 minutes).
 - A background cleanup marks expired `PENDING` bookings as `FAILED` after 5 minutes.
-- Database also enforces uniqueness for active bookings on `(doctorId, timeSlot)` where status is `PENDING|CONFIRMED`.
+- Database is the final gate for consistency (not Redis).
+- Database enforces uniqueness for active bookings on `(doctorId, date, timeSlot)` where status is `PENDING|CONFIRMED`.
+- Duplicate key errors (`11000`) are mapped to `Slot already booked`.
 
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.
