@@ -600,6 +600,7 @@ Response:
   - `${FRONTEND_URL}/payment-result?orderId=<orderId>&status=COMPLETED|FAILED&code=<vnp_ResponseCode>`
 
 ### GET /payment/:orderId
+### GET /payments/:orderId
 Description: Get payment status by order/appointment id.
 Auth: Public
 Response:
