@@ -4,6 +4,11 @@ Base URL: `/api` (global prefix set in `src/main.ts`)
 
 This document is generated from controller definitions in the codebase. Auth refactor note: many endpoints now derive user identity from JWT (`req.user`) rather than request params/body.
 
+Datetime validation note:
+- All datetime request fields must be ISO 8601 with timezone (`Z` or `+/-HH:mm`).
+- Datetime values without timezone are rejected with `400 Bad Request`.
+- Internal processing normalizes datetimes to UTC and converts to epoch milliseconds.
+
 ## Auth
 
 ### POST /auth/register
@@ -398,8 +403,15 @@ Auth: Public
 Description: Register a shift for authenticated doctor.
 Auth: Required (JWT)
 Body: `RegisterShiftRequestDto`
-- `date`: string (YYYY-MM-DD)
+- `startTime`: string (ISO 8601 with timezone)
+- `endTime`: string (ISO 8601 with timezone)
+- `legacyAllowMissingTimezone`: boolean (optional, temporary backward-compatibility fallback)
 - `shift`: `morning | afternoon | extra`
+
+Validation:
+- `endTime` must be greater than `startTime`.
+- Missing timezone is rejected by default.
+- Temporary fallback mode (`legacyAllowMissingTimezone=true`) assumes `Asia/Ho_Chi_Minh` and logs `[TimeWarning]`.
 
 ### GET /shift/doctor/:doctorId/month
 Description: Get shifts by doctor and month.
@@ -646,6 +658,7 @@ Response: string
   - `PATCH /profiles/:accountId` ? `PATCH /profiles/me`
   - `GET /doctors/account/:accountId` ? `GET /doctors/me`
   - `POST /shift/register` now requires JWT and uses doctorId from token
+  - `POST /shift/register` now requires `startTime` and `endTime` (ISO 8601 with timezone); legacy `date` payload is removed
   - `POST /doctor-posts` now requires JWT and uses doctorId from token
   - `GET /chat/conversations` no longer takes `accountId` in query
   - `POST /chat/conversations/:id/read` no longer accepts `accountId` in body
