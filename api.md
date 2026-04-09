@@ -8,6 +8,7 @@ Datetime validation note:
 - All datetime request fields must be ISO 8601 with timezone (`Z` or `+/-HH:mm`).
 - Datetime values without timezone are rejected with `400 Bad Request`.
 - Internal processing normalizes datetimes to UTC and converts to epoch milliseconds.
+- Exception: path parameters that represent date-only filters may require `YYYY-MM-DD` by endpoint contract.
 
 ## Auth
 
@@ -484,6 +485,8 @@ Query: `specialtyId`, `keyword`
 Description: Get doctor timeslots by date.
 Auth: Public
 Query: `status` (optional)
+Params:
+- `date`: string (`YYYY-MM-DD`, date-only). This endpoint does not accept full ISO datetime.
 
 ### GET /doctors/me
 Description: Get doctor by authenticated account id.
