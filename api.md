@@ -257,8 +257,9 @@ Response examples:
 ```
 
 Notes:
-- Redis is used only for race-condition protection (TTL 5 minutes).
-- A background cleanup marks expired `PENDING` bookings as `FAILED` after 5 minutes.
+- Redis is used only for race-condition protection (TTL aligned with VNPay expiry).
+- A background cleanup marks expired `PENDING` bookings as `FAILED` when VNPay expiry window is reached.
+- Source of truth for TTL is `VN_PAY_EXPIRE_MINUTES` (default 15).
 - Database is the final gate for consistency (not Redis).
 - Database enforces uniqueness for active bookings on `(doctorId, date, timeSlot)` where status is `PENDING|CONFIRMED`.
 - Duplicate key errors (`11000`) are mapped to `Slot already booked`.
@@ -636,6 +637,121 @@ Notes:
 - `paidAt` can be `null` for unpaid/failed records.
 - `orderId` maps to appointment id (`vnp_TxnRef`).
 
+## WebSocket (Socket.IO)
+
+Transport:
+- Socket.IO (NestJS WebSocket gateway)
+- Default Socket.IO path: `/socket.io`
+- Namespace is mandatory when connecting (listed below)
+
+Connection Auth (all namespaces):
+- JWT is validated at gateway connection middleware (shared base gateway logic).
+- Client must provide token in one of two ways:
+  - `auth.token` in Socket.IO connect options
+  - `Authorization: Bearer <token>` handshake header
+- Missing/invalid/expired token => connection rejected with Unauthorized.
+
+Room model:
+- User-targeted pushes are mostly sent to room by email.
+- After connected, client should emit `JOIN_ROOM` (no payload required).
+- Server resolves email from JWT payload and joins room `<email>`.
+- Server ack event: `ROOM_JOINED` with payload `{ email }`.
+
+### Namespace `/appointment`
+Purpose: booking lifecycle and cancellation notifications.
+
+Server push events:
+- `APPOINTMENT_BOOKING_SUCCESS`
+- `APPOINTMENT_BOOKING_PENDING`
+- `APPOINTMENT_BOOKING_FAILED`
+- `APPOINTMENT_CANCELLED`
+- `SHIFT_CANCELLED`
+
+Event source flow:
+- Appointment booking service emits domain events `appointment.booking.pending|success|failed`
+- Booking listener maps to socket events `socket.appointment.pending|success|failed`
+- Appointment gateway (`/appointment`) pushes to email room(s)
+- Shift cancellation and appointment cancellation also emit `socket.shift.cancelled` and `socket.appointment.cancelled` => pushed via the same `/appointment` namespace
+
+### Namespace `/appointment/fields-data`
+Purpose: supporting data for booking form.
+
+Client events:
+- `get_timeslots_by_doctor` (currently placeholder; no payload returned from gateway)
+
+Server push events:
+- `hospital-specialties.fetched`
+- `DOCTOR_LIST_FETCHED`
+
+Important:
+- These server pushes are sent to email room, so client still needs `JOIN_ROOM`.
+
+### Namespace `/payment/vnpay`
+Purpose: payment url and payment status updates.
+
+Server push events:
+- `PAYMENT_VNPAY_URL_CREATED` payload `{ appointmentId, paymentUrl }` (to user email room)
+- `payment:update` payload `{ orderId, status }` (broadcast to all clients in namespace)
+
+Event source flow:
+- Booking flow emits `payment.vnpay.url.created` => VnPay gateway pushes `PAYMENT_VNPAY_URL_CREATED`
+- VNPay return endpoint emits `payment.update` => VnPay gateway broadcasts `payment:update`
+
+### Namespace `/patient-profile`
+Purpose: push assembled patient profile data.
+
+Server push events:
+- `PATIENT_PROFILE`
+
+Event source flow:
+- Profile saga emits `socket.push.patient-profile` with `{ roomEmail }`
+- Patient profile gateway pushes to that email room
+
+### Namespace `/chat`
+Purpose: realtime chat messaging.
+
+Client events:
+- `CHAT_JOIN_USER` / `CHAT_LEAVE_USER`
+- `CHAT_JOIN_CONVERSATION` / `CHAT_LEAVE_CONVERSATION`
+- `CHAT_MESSAGE_SEND`
+- `CHAT_MESSAGE_READ`
+
+Server push events:
+- `CHAT_MESSAGE_RECEIVED`
+- `CHAT_MESSAGE_READ`
+- `ROOM_JOINED`
+
+Room model:
+- User room: `user:<accountId>`
+- Conversation room: `conv:<conversationId>`
+
+### Namespace `/auth`
+Purpose: authenticated socket connection scope for auth-related realtime extensions.
+
+Current status:
+- Namespace exists and inherits JWT middleware.
+- No dedicated push events are currently emitted in the codebase.
+
+## Notification And Wallet Realtime Notes
+
+Notification:
+- Notification module persists notification data on `notify.*` domain events.
+- It does not expose a dedicated notification socket namespace.
+- Realtime appointment/shift-related user alerts are delivered through `/appointment` socket events above.
+
+Wallet:
+- Wallet module currently has HTTP APIs (`/wallet/balance`, `/wallet/details`) and event-driven updates in service/listeners.
+- There is no dedicated wallet socket gateway/event for realtime balance change push.
+- FE should refresh wallet state via HTTP after booking/cancel/shift-cancel/payment update flows.
+
+## FE Integration Checklist (Socket)
+
+1. Connect to the exact namespace you need (`/appointment`, `/payment/vnpay`, `/chat`, etc.)
+2. Always pass JWT in handshake (`auth.token` preferred)
+3. Immediately emit `JOIN_ROOM` after connected for email-based push namespaces
+4. Subscribe to exact event names from `SocketEventsEnum` (case-sensitive)
+5. For wallet realtime, use HTTP re-fetch strategy because no wallet socket event exists yet
+
 ## System
 
 ### GET /
@@ -649,8 +765,8 @@ Response: string
 - User identity is derived from JWT (`req.user`), including `accountId`, `patientId`, `doctorId`, and `email`.
 - Appointment booking core flow is now synchronous in `AppointmentBookingService` (no saga/event chaining for core state transitions).
 - New booking status: `FAILED`.
-- Booking now uses Redis slot lock key `slot:{doctorId}:{timeSlotId}` with TTL 300s.
-- Expired `PENDING` bookings are auto-marked `FAILED` after 5 minutes.
+- Booking now uses Redis slot lock key `slot:{doctorId}:{timeSlotId}` with TTL aligned to VNPay expiry (`VN_PAY_EXPIRE_MINUTES`, default 15 minutes).
+- Expired `PENDING` bookings are auto-marked `FAILED` on the same VNPay expiry window.
 - Routes changed:
   - `GET /appointment/completed/doctor/:doctorId` ? `GET /appointment/completed/doctor`
   - `GET /appointment/today?doctorId=...` ? `GET /appointment/today`
