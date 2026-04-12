@@ -347,16 +347,63 @@ Auth: Required (JWT)
 Body:
 - `participants`: array of `{ accountId, email?, role }`
 - `title`: string (optional)
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Conversation created",
+  "data": {
+    "_id": "<conversationId>",
+    "type": "direct",
+    "participants": [{ "accountId": "...", "email": "...", "role": "..." }],
+    "title": null,
+    "lastMessage": null,
+    "createdAt": "...",
+    "updatedAt": "..."
+  }
+}
+```
 
 ### GET /chat/conversations
 Description: List conversations for authenticated user.
 Auth: Required (JWT)
 Query: `skip`, `limit`
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched conversations",
+  "data": {
+    "data": [
+      {
+        "_id": "<conversationId>",
+        "participants": [
+          {
+            "accountId": "...",
+            "email": "...",
+            "role": "...",
+            "displayName": "...",
+            "avatarUrl": null
+          }
+        ],
+        "lastMessage": { "content": "...", "senderId": "...", "at": "..." },
+        "updatedAt": "..."
+      }
+    ],
+    "total": 1,
+    "skip": 0,
+    "limit": 20
+  }
+}
+```
 
 ### GET /chat/conversations/:id/messages
 Description: List messages in a conversation.
 Auth: Required (JWT)
 Query: `before`, `limit`
+Notes:
+- Sorted by `createdAt desc, _id desc` for deterministic ordering.
+- `limit` is capped at `50`.
 
 ### POST /chat/conversations/:id/read
 Description: Mark conversation as read for authenticated user.
@@ -367,6 +414,39 @@ Body: none
 Description: Search contacts.
 Auth: Required (JWT)
 Query: `q`, `role`, `limit`
+
+### Realtime Socket Contract (`/chat` namespace)
+Connection auth:
+- JWT token in `handshake.auth.token` (or `Authorization: Bearer <token>`).
+
+Main rooms:
+- Personal room: `user:{accountId}`
+- Conversation room: `conv:{conversationId}`
+
+Client -> Server events:
+- `CHAT_JOIN_USER`: join personal room for notification fanout
+- `CHAT_LEAVE_USER`
+- `CHAT_JOIN_CONVERSATION`: payload `{ conversationId }`
+- `CHAT_LEAVE_CONVERSATION`: payload `{ conversationId }`
+- `CHAT_MESSAGE_SEND`: payload `{ conversationId, content, clientMessageId? }`
+- `CHAT_MESSAGE_READ`: payload `{ conversationId }`
+
+Server -> Client events:
+- `ROOM_JOINED`: payload `{ room? , conversationId? }`
+- `CHAT_MESSAGE_RECEIVED`: DataResponse with persisted message payload
+- `CHAT_MESSAGE_READ`: payload `{ conversationId, accountId }`
+- `CHAT_MESSAGE_DELIVERED`: DataResponse ACK in worker mode (message queued asynchronously)
+
+Queue migration notes (backward-compatible):
+- Queue name: `chat.message.created`.
+- `CHAT_WRITE_MODE=dual` (default):
+  - Gateway writes MongoDB directly (legacy-safe)
+  - Gateway also publishes RabbitMQ event for migration telemetry
+- `CHAT_WRITE_MODE=worker`:
+  - Gateway publishes queue event and returns ACK (`CHAT_MESSAGE_DELIVERED`)
+  - Worker persists message, updates conversation snapshot, then publishes realtime event
+- `CHAT_REALTIME_MODE=direct` (default): Gateway emits socket directly.
+- `CHAT_REALTIME_MODE=redis`: Worker publishes to Redis channel `chat.message`, gateway subscribes and fanouts.
 
 ## Patients
 
