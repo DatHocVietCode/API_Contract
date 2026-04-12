@@ -15,15 +15,17 @@ Scope: Backend booking flow hardening in Appointment module + VNPay callback/pay
 ### 1. Database-level slot protection
 
 - Appointment unique index updated to:
-  - `(doctorId, date, timeSlot)`
+  - `(doctorId, appointmentDate, timeSlot)`
   - Unique only for active statuses: `PENDING`, `CONFIRMED`.
 - Why:
   - Previous key `(doctorId, timeSlot)` was insufficient across dates.
   - DB uniqueness guarantees correctness even if Redis lock is bypassed/expired.
+- Note:
+  - Current persistence may still use a legacy field name `date`; semantically this is the scheduled `appointmentDate`.
 
 ### 2. Booking pre-check before insert
 
-- Added DB pre-check for same `(doctorId, date, timeSlot)` with active statuses.
+- Added DB pre-check for same `(doctorId, appointmentDate, timeSlot)` with active statuses.
 - If already exists:
   - Release Redis lock.
   - Return `Slot already booked`.
@@ -111,3 +113,4 @@ Updated in `api-contract/api.md`:
 - Repeated online booking payment-trigger action -> no duplicate payment record/URL creation.
 - Duplicate callback from VNPay -> idempotent status update, no double state transition.
 - Callback with invalid checksum -> marked failed path, redirected to frontend result.
+- API compatibility: legacy `date` request input still works temporarily, but new clients should send `appointmentDate`.

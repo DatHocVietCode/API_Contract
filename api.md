@@ -200,7 +200,9 @@ Description: Book an appointment. Patient identity is derived from JWT.
 Auth: Required (JWT)
 Body: `AppointmentBookingRequestDto`
 - `hospitalName`: string
-- `date`: string/date
+- `appointmentDate`: string (required, scheduled date selected by user; ISO 8601 with timezone)
+- `bookingDate`: string (optional, booking creation timestamp; ISO 8601 with timezone). If omitted, server uses request processing time.
+- `date`: string/date (deprecated, legacy alias for `appointmentDate`)
 - `specialty`: string (optional)
 - `timeSlotId`: string
 - `doctor`: { `id`, `name`, `email` } (doctor id required)
@@ -210,15 +212,54 @@ Body: `AppointmentBookingRequestDto`
 - `reasonForAppointment`: string (optional)
 - `coinsToUse`: number (optional)
 - `useCoin`: boolean (optional)
+Semantics:
+- `appointmentDate`: Represents when the medical visit is scheduled to happen.
+- `bookingDate`: Represents when the booking request is created/recorded.
+- Backward compatibility: `date` is still accepted temporarily and treated as `appointmentDate` when `appointmentDate` is missing.
 Core flow:
 - Validate request
 - Acquire Redis slot lock `SET slot:{doctorId}:{timeSlotId} NX EX 300`
-- Pre-check slot in database for same `(doctorId, date, timeSlot)` with status in `PENDING|CONFIRMED`
+- Pre-check slot in database for same `(doctorId, appointmentDate, timeSlot)` with status in `PENDING|CONFIRMED`
 - Create appointment with `PENDING` and mark timeslot `booked` in a MongoDB transaction
 - Process payment synchronously by payment method
 - For online payment, create an idempotent payment record per appointment before generating payment URL
 - If payment success -> set `CONFIRMED`
 - If payment fails -> set `FAILED` and release slot lock/slot
+
+Request examples:
+1. Preferred payload (new contract)
+```json
+{
+  "hospitalName": "Bệnh viện Đa khoa",
+  "appointmentDate": "2026-04-15T02:00:00Z",
+  "timeSlotId": "67f2b1...",
+  "doctor": {
+    "id": "67f1a0...",
+    "name": "Nguyen Van A",
+    "email": "doctor@example.com"
+  },
+  "serviceType": "KHAM_DICH_VU",
+  "paymentMethod": "ONLINE",
+  "amount": 100000,
+  "reasonForAppointment": "Tai kham dinh ky"
+}
+```
+
+2. Backward-compatible legacy payload (deprecated)
+```json
+{
+  "hospitalName": "Bệnh viện Đa khoa",
+  "date": "2026-04-15T02:00:00Z",
+  "timeSlotId": "67f2b1...",
+  "doctor": {
+    "id": "67f1a0...",
+    "name": "Nguyen Van A",
+    "email": "doctor@example.com"
+  },
+  "serviceType": "KHAM_DICH_VU",
+  "paymentMethod": "ONLINE"
+}
+```
 
 Response examples:
 1. Slot locked by another booking
@@ -261,8 +302,10 @@ Notes:
 - A background cleanup marks expired `PENDING` bookings as `FAILED` when VNPay expiry window is reached.
 - Source of truth for TTL is `VN_PAY_EXPIRE_MINUTES` (default 15).
 - Database is the final gate for consistency (not Redis).
-- Database enforces uniqueness for active bookings on `(doctorId, date, timeSlot)` where status is `PENDING|CONFIRMED`.
+- Database enforces uniqueness for active bookings on `(doctorId, appointmentDate, timeSlot)` where status is `PENDING|CONFIRMED`.
 - Duplicate key errors (`11000`) are mapped to `Slot already booked`.
+- Deprecated field notice: `date` will be removed in a future version. Use `appointmentDate` instead.
+- If both `appointmentDate` and deprecated `date` are provided, `appointmentDate` takes precedence.
 
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.
