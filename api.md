@@ -323,10 +323,47 @@ Description: Get appointment by id.
 Auth: Public
 
 ### PATCH /appointment/reschedule
-Description: Reschedule appointment.
+Description: Reschedule an existing appointment to a new date and time slot.
 Auth: Required (JWT)
 Body: `RescheduleAppointmentDto`
-- `appointmentId`, `newDate`, `newTimeSlotId`, `reason` (optional)
+- `appointmentId`: string (MongoId)
+- `newDate`: string (required, ISO 8601 with timezone)
+- `newTimeSlotId`: string (MongoId)
+- `reason`: string (optional)
+Flow:
+- Gateway validates JWT via `JwtAuthGuard`.
+- Controller forwards `appointmentId`, `newDate`, `newTimeSlotId`, and `reason` into `AppointmentService.rescheduleAppointment()`.
+- Service parses `newDate` once, resolves the current stored snapshot time, and blocks reschedule when the appointment is within 24 hours.
+- Service updates `appointment.date`, `scheduledAt`, `startTime`, `endTime`, and `timeSlot` to the newly selected slot.
+- Old time slot is released and the new time slot is marked `booked`.
+- Service emits `appointment.rescheduled` for wallet refund processing.
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Appointment rescheduled successfully (50% refund (rescheduled 24-48 hours before))",
+  "data": {
+    "appointmentId": "<appointmentId>",
+    "refundAmount": 50000,
+    "refundReason": "50% refund (rescheduled 24-48 hours before)",
+    "newDate": "2026-04-15T02:00:00.000Z",
+    "scheduledAt": 1776218400000,
+    "startTime": 1776218400000,
+    "endTime": 1776220200000,
+    "hoursUntilAppointment": "36.5"
+  }
+}
+```
+Rules:
+- Reschedule is allowed only for `PENDING` and `CONFIRMED` appointments.
+- Reschedule is rejected when there are `<= 24` hours remaining.
+- Refund policy is tiered:
+  - `> 48h`: full refund
+  - `24h - 48h`: 50% refund
+  - `<= 24h`: blocked
+Notes:
+- Backend currently protects the endpoint with JWT, but ownership/participant authorization should still be reviewed in the service layer before FE integration.
+- The refund side effect is handled asynchronously by `RescheduleListener` through `appointment.rescheduled`.
 
 ### PATCH /appointment/cancel
 Description: Cancel appointment.
