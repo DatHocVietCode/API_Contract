@@ -322,48 +322,38 @@ Body: `CompleteAppointmentDto`
 Description: Get appointment by id.
 Auth: Public
 
-### PATCH /appointment/reschedule
-Description: Reschedule an existing appointment to a new date and time slot.
+### PATCH /appointment/:id/reschedule
+Description: Reschedule an appointment using `appointmentDate + timeSlotId` and persist snapshot fields.
 Auth: Required (JWT)
-Body: `RescheduleAppointmentDto`
-- `appointmentId`: string (MongoId)
-- `newDate`: string (required, ISO 8601 with timezone)
-- `newTimeSlotId`: string (MongoId)
+Params:
+- `id`: appointment id
+Body: `AppointmentRescheduleDto`
+- `appointmentDate`: string (ISO 8601 with timezone)
+- `timeSlotId`: string
 - `reason`: string (optional)
-Flow:
-- Gateway validates JWT via `JwtAuthGuard`.
-- Controller forwards `appointmentId`, `newDate`, `newTimeSlotId`, and `reason` into `AppointmentService.rescheduleAppointment()`.
-- Service parses `newDate` once, resolves the current stored snapshot time, and blocks reschedule when the appointment is within 24 hours.
-- Service updates `appointment.date`, `scheduledAt`, `startTime`, `endTime`, and `timeSlot` to the newly selected slot.
-- Old time slot is released and the new time slot is marked `booked`.
-- Service emits `appointment.rescheduled` for wallet refund processing.
+
+Behavior:
+- Uses `AppointmentTimeHelper.resolveTimeWindow()` to compute `scheduledAt`, `startTime`, `endTime` from `appointmentDate + timeSlot`.
+- Keeps existing `bookingDate` unchanged.
+- Uses Redis slot lock (`slot:{doctorId}:{timeSlotId}`) and conflict check that excludes the current appointment.
+- Prevents reschedule to past time.
+
 Response (Success):
 ```json
 {
   "code": "SUCCESS",
-  "message": "Appointment rescheduled successfully (50% refund (rescheduled 24-48 hours before))",
+  "message": "Appointment rescheduled successfully",
   "data": {
-    "appointmentId": "<appointmentId>",
-    "refundAmount": 50000,
-    "refundReason": "50% refund (rescheduled 24-48 hours before)",
-    "newDate": "2026-04-15T02:00:00.000Z",
-    "scheduledAt": 1776218400000,
-    "startTime": 1776218400000,
-    "endTime": 1776220200000,
-    "hoursUntilAppointment": "36.5"
+    "appointmentId": "...",
+    "appointmentDate": "2026-04-20T02:00:00.000Z",
+    "scheduledAt": 1776650400000,
+    "startTime": 1776650400000,
+    "endTime": 1776652200000,
+    "bookingDate": 1775000000000,
+    "reason": "..."
   }
 }
 ```
-Rules:
-- Reschedule is allowed only for `PENDING` and `CONFIRMED` appointments.
-- Reschedule is rejected when there are `<= 24` hours remaining.
-- Refund policy is tiered:
-  - `> 48h`: full refund
-  - `24h - 48h`: 50% refund
-  - `<= 24h`: blocked
-Notes:
-- Backend currently protects the endpoint with JWT, but ownership/participant authorization should still be reviewed in the service layer before FE integration.
-- The refund side effect is handled asynchronously by `RescheduleListener` through `appointment.rescheduled`.
 
 ### PATCH /appointment/cancel
 Description: Cancel appointment.
