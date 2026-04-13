@@ -709,10 +709,35 @@ Auth: Public
 ## Prescription
 
 ### POST /prescription/:id/generate-pdf
-Description: Generate prescription PDF for appointment or record.
+Description: Generate a prescription PDF file and return a public URL to the generated document.
 Auth: Public
+Path Params:
+- `id`: string (target record / appointment id used to create the output folder)
 Body: `CreatePrescriptionPdfDto`
-Response: `{ code: "SUCCESS", data: { url } }`
+- `diagnosis`: string
+- `prescriptions`: array of `{ medicineId?, name, quantity, note? }`
+- `note`: string (optional)
+- `dateRecord`: string (required, ISO 8601 with timezone; serialized into a Date on the server)
+- `patientName`: string (optional)
+- `patientAge`: number (optional)
+- `doctorName`: string (optional)
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "PDF generated successfully",
+  "data": {
+    "url": "http://localhost:3000/prescription/<id>/prescription.pdf"
+  }
+}
+```
+Behavior:
+- Server renders HTML with Puppeteer, writes the PDF to `public/prescription/<id>/prescription.pdf`.
+- The controller returns a fully qualified URL using `BASE_URL` when available, otherwise `http://localhost:<PORT>`.
+- The generated file is served statically, so FE can open the URL directly in a new tab or use it as a download link.
+Notes:
+- Send `dateRecord` as an ISO 8601 string with timezone to avoid validation issues.
+- The endpoint returns JSON metadata, not a binary PDF stream.
 
 ## Payment (VNPay)
 
