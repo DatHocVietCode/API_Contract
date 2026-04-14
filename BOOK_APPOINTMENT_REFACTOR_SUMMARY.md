@@ -3,6 +3,47 @@
 Date: 2026-04-08
 Scope: Backend booking flow hardening in Appointment module + VNPay callback/payment status integration
 
+## Update 2026-04-14 (Coin/Credit Separation)
+
+Scope: Separate reward coin from financial credit for safer accounting and FE consistency.
+
+### What changed
+
+- `COIN` is no longer accepted as a standalone booking payment method.
+- New booking payment option: `CREDIT` (money-equivalent wallet).
+- Coin is now discount-only in booking flow (`useCoin=true` + optional `coinsToUse`).
+- Booking response now always includes amount breakdown:
+  - `originalAmount`
+  - `discountAmount`
+  - `finalAmount`
+- Refund flows (appointment cancel / shift cancel) now credit financial wallet (`CreditWallet`) instead of adding coin.
+- Wallet APIs now expose both domains for FE rendering:
+  - `coinBalance` (reward)
+  - `creditBalance` (financial)
+
+### Discount policy applied in booking
+
+- Percentage-based discount (current policy: 10%).
+- Per-transaction cap (current policy: 30,000).
+- Actual discount is bounded by:
+  - policy percentage,
+  - cap,
+  - available non-expired coin,
+  - optional `coinsToUse` requested by client.
+
+### Coin expiration behavior
+
+- Coin earn transactions support `expiresAt`.
+- Available coin calculation excludes expired earn transactions.
+- Legacy wallet balance is still supported via migration seeding into coin transaction ledger.
+
+### FE integration notes
+
+- For booking UI, always render using `originalAmount`, `discountAmount`, `finalAmount` from response.
+- If `finalAmount = 0`, booking can be confirmed without external payment URL.
+- For wallet UI, show coin and credit as separate balances and histories.
+- After cancel/shift-cancel, refresh `creditBalance` because refund goes to credit.
+
 ## Goals
 
 - Prevent double booking under concurrent requests.
