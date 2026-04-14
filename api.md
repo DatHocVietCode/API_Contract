@@ -665,6 +665,39 @@ Response:
 }
 ```
 
+### GET /wallet/coin/summary
+Description: Get FIFO-based coin summary (usable/expired/expiring + per-earn breakdown).
+Auth: Required (JWT)
+Response:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched coin summary successfully",
+  "data": {
+    "totalBalance": 12000,
+    "usableCoin": 9000,
+    "expiredCoin": 3000,
+    "expiringSoon": 1500,
+    "breakdown": [
+      {
+        "transactionId": "...",
+        "amount": 5000,
+        "used": 2000,
+        "remaining": 3000,
+        "expiresAt": "2026-04-20T00:00:00.000Z",
+        "category": "active",
+        "isExpiringSoon": true
+      }
+    ]
+  }
+}
+```
+
+Notes:
+- FIFO consumption is simulated at read-time from completed transactions.
+- `category` can be `active`, `expired`, or `non_expiring` (when `expiresAt` is missing).
+- `expiringSoon` counts remaining coin that expires within the next 7 days.
+
 ## Profiles
 
 ### GET /profiles/:id
