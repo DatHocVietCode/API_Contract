@@ -674,7 +674,7 @@ Response:
 ```
 
 ### GET /wallet/coin/summary
-Description: Get FIFO-based coin summary (usable/expired/expiring + per-earn breakdown).
+Description: Get expiration-aware coin summary with FEFO consumption breakdown (usable/expired/expiring + per-earn allocation).
 Auth: Required (JWT)
 Response:
 ```json
@@ -702,9 +702,12 @@ Response:
 ```
 
 Notes:
-- FIFO consumption is simulated at read-time from completed transactions.
+- **FEFO (First Expire, First Out)**: Spend consumes expiring lots first, sorted by `expiresAt ASC`, then non-expiring lots.
+- **Partial consumption**: A single spend can consume from multiple earn lots; the `used` field in each lot shows how much was allocated.
 - `category` can be `active`, `expired`, or `non_expiring` (when `expiresAt` is missing).
-- `expiringSoon` counts remaining coin that expires within the next 7 days.
+- Expired lots are never allocated for spend; they remain in `expiredCoin` only.
+- `expiringSoon` counts remaining coin from active lots that expire within the next 7 days.
+- Breakdown order: expired lots first, then spendable lots in FEFO order.
 
 ## Profiles
 
