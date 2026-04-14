@@ -207,11 +207,11 @@ Body: `AppointmentBookingRequestDto`
 - `timeSlotId`: string
 - `doctor`: { `id`, `name`, `email` } (doctor id required)
 - `serviceType`: enum
-- `paymentMethod`: enum
+- `paymentMethod`: `ONLINE | VNPAY | CREDIT | CASH | OFFLINE` (`COIN` is deprecated)
 - `amount`: number (optional)
 - `reasonForAppointment`: string (optional)
-- `coinsToUse`: number (optional)
-- `useCoin`: boolean (optional)
+- `coinsToUse`: number (optional, requested coin discount amount)
+- `useCoin`: boolean (optional, apply coin discount)
 Semantics:
 - `appointmentDate`: Represents when the medical visit is scheduled to happen.
 - `bookingDate`: Represents when the booking request is created/recorded.
@@ -220,10 +220,15 @@ Core flow:
 - Validate request
 - Acquire Redis slot lock `SET slot:{doctorId}:{timeSlotId} NX EX 300`
 - Pre-check slot in database for same `(doctorId, appointmentDate, timeSlot)` with status in `PENDING|CONFIRMED`
-- Create appointment with `PENDING` and mark timeslot `booked` in a MongoDB transaction
-- Process payment synchronously by payment method
+- Calculate amount breakdown:
+  - `originalAmount = amount`
+  - `discountAmount = min(availableCoin, requestedCoin?, originalAmount * 10%, 30000)` when `useCoin=true`
+  - `finalAmount = originalAmount - discountAmount`
+- Create appointment with `PENDING`, persist `coinDiscountAmount`, `paymentAmount=finalAmount`, and mark timeslot `booked` in a MongoDB transaction
+- If `discountAmount > 0`, deduct coin as discount transaction
+- Process remaining `finalAmount` by payment method (`ONLINE|VNPAY` async, `CREDIT` sync)
 - For online payment, create an idempotent payment record per appointment before generating payment URL
-- If payment success -> set `CONFIRMED`
+- If payment success (or `finalAmount = 0`) -> set `CONFIRMED`
 - If payment fails -> set `FAILED` and release slot lock/slot
 
 Request examples:
@@ -274,26 +279,53 @@ Response examples:
   "message": "Appointment created. Complete payment to confirm booking.",
   "data": {
     "appointmentId": "<appointmentId>",
-    "paymentUrl": "https://..."
+    "paymentUrl": "https://...",
+    "originalAmount": 100000,
+    "discountAmount": 10000,
+    "finalAmount": 90000
   }
 }
 ```
 
-3. COIN payment success
+3. CREDIT payment success
 ```json
 {
   "code": "SUCCESS",
-  "message": "Deducted ... coins successfully",
-  "data": { "appointmentId": "<appointmentId>" }
+  "message": "Deducted ... credit successfully",
+  "data": {
+    "appointmentId": "<appointmentId>",
+    "originalAmount": 100000,
+    "discountAmount": 10000,
+    "finalAmount": 90000
+  }
 }
 ```
 
-4. Payment/booking failed
+4. Zero-final booking (fully discounted by policy)
+```json
+{
+  "code": "SUCCESS",
+  "message": "Appointment confirmed successfully",
+  "data": {
+    "appointmentId": "<appointmentId>",
+    "originalAmount": 20000,
+    "discountAmount": 20000,
+    "finalAmount": 0
+  }
+}
+```
+
+5. Payment/booking failed
 ```json
 {
   "code": "ERROR",
   "message": "...",
-  "data": { "appointmentId": "<appointmentId>" }
+  "data": {
+    "appointmentId": "<appointmentId>",
+    "originalAmount": 100000,
+    "discountAmount": 10000,
+    "finalAmount": 90000
+  }
 }
 ```
 
@@ -306,6 +338,8 @@ Notes:
 - Duplicate key errors (`11000`) are mapped to `Slot already booked`.
 - Deprecated field notice: `date` will be removed in a future version. Use `appointmentDate` instead.
 - If both `appointmentDate` and deprecated `date` are provided, `appointmentDate` takes precedence.
+- `paymentMethod=COIN` is deprecated and rejected. Use `useCoin=true` with `ONLINE|VNPAY|CREDIT`.
+- Coin used in booking is discount-only and never treated as standalone payment.
 
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.
@@ -591,11 +625,45 @@ Body: `reason`: string
 ### GET /wallet/balance
 Description: Get wallet balance for authenticated patient.
 Auth: Required (JWT)
+Response:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched wallet balance",
+  "data": {
+    "balance": 12000,
+    "coinBalance": 12000,
+    "creditBalance": 250000
+  }
+}
+```
+
+Notes:
+- `balance` is kept for backward compatibility and maps to `coinBalance`.
 
 ### GET /wallet/details
 Description: Get wallet details and history for authenticated patient.
 Auth: Required (JWT)
 Query: `page`, `limit`
+Response:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched wallet details successfully",
+  "data": {
+    "coinBalance": 12000,
+    "totalCoinEarned": 50000,
+    "totalCoinUsed": 38000,
+    "creditBalance": 250000,
+    "totalCredited": 350000,
+    "totalDebited": 100000,
+    "transactions": [],
+    "creditTransactions": [],
+    "pagination": { "page": 1, "limit": 10, "total": 20, "totalPages": 2 },
+    "creditPagination": { "page": 1, "limit": 10, "total": 8, "totalPages": 1 }
+  }
+}
+```
 
 ## Profiles
 
@@ -918,6 +986,7 @@ Wallet:
 - Wallet module currently has HTTP APIs (`/wallet/balance`, `/wallet/details`) and event-driven updates in service/listeners.
 - There is no dedicated wallet socket gateway/event for realtime balance change push.
 - FE should refresh wallet state via HTTP after booking/cancel/shift-cancel/payment update flows.
+- Cancellation refund is now credited to `creditBalance`; coin reward/discount is tracked separately.
 
 ## FE Integration Checklist (Socket)
 
@@ -942,6 +1011,11 @@ Response: string
 - New booking status: `FAILED`.
 - Booking now uses Redis slot lock key `slot:{doctorId}:{timeSlotId}` with TTL aligned to VNPay expiry (`VN_PAY_EXPIRE_MINUTES`, default 15 minutes).
 - Expired `PENDING` bookings are auto-marked `FAILED` on the same VNPay expiry window.
+- `paymentMethod=COIN` is deprecated and rejected by booking API.
+- New `paymentMethod=CREDIT` allows wallet-based monetary payment.
+- Booking response now includes `originalAmount`, `discountAmount`, `finalAmount`.
+- Wallet responses now include separate `coinBalance` and `creditBalance`.
+- Appointment cancellation/shift-cancellation refunds are credited to credit wallet (financial), not coin wallet (reward).
 - Routes changed:
   - `GET /appointment/completed/doctor/:doctorId` ? `GET /appointment/completed/doctor`
   - `GET /appointment/today?doctorId=...` ? `GET /appointment/today`
