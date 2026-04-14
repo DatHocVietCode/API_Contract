@@ -106,6 +106,10 @@ Description: Refresh access token.
 Auth: Public
 Request Body:
 - `refreshToken`: string
+HTTP Status:
+- `200`: refresh success
+- `401`: refresh token invalid/expired/mismatch
+- `500`: unexpected server error
 Response (Success):
 ```json
 { "code": "SUCCESS", "message": "Access token refreshed", "data": { "accessToken": "...", "refreshToken": "..." } }
@@ -114,6 +118,10 @@ Response (Error):
 ```json
 { "code": "ERROR", "message": "Invalid refresh token", "data": null }
 ```
+
+Access token expiry handling for FE:
+- Protected endpoints return `401` when access token is invalid/expired.
+- FE should call `POST /auth/refresh` with refresh token, update access token, then retry the failed request.
 
 ## Users / Accounts
 
