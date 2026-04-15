@@ -150,15 +150,34 @@ Trong `handleDispatch(...)` consumer:
 - Listener publish redis: [../src/wallet/coin-expiry-reminder/listenners/coin-expiry-reminder-realtime.listenner.ts](../src/wallet/coin-expiry-reminder/listenners/coin-expiry-reminder-realtime.listenner.ts#L11)
 - Redis channel: `coin.expiry.reminder`
 
-### Phase F - Redis -> Gateway -> WebSocket
+### Phase F - Event -> Gateway -> WebSocket (Direct + Redis Fanout)
 
-#### F1. Gateway-side subscriber
-- Socket listener subscribe Redis: [../src/socket/listenners/coin-expiry-reminder.listenner.ts](../src/socket/listenners/coin-expiry-reminder.listenner.ts#L20)
-- Emit to room by patient email: [../src/socket/listenners/coin-expiry-reminder.listenner.ts](../src/socket/listenners/coin-expiry-reminder.listenner.ts#L31)
+#### F1. Direct socket emit (same-instance, no latency)
+- Event listener: [../src/socket/namespace/appointment/appointment-coin-expiry.gateway.ts](../src/socket/namespace/appointment/appointment-coin-expiry.gateway.ts#L27)
+- Listens to: `notification.coin.expiry.reminder` 
+- Emits on: `/appointment` namespace (**namespace match** with client ✅)
+- Result: Same-server clients receive **immediately** (0-5ms)
+
+#### F2. Redis fanout (multi-server)
+- Redis Listener: [../src/socket/listenners/coin-expiry-reminder-redis.listenner.ts](../src/socket/listenners/coin-expiry-reminder-redis.listenner.ts#L24)
+- Subscribes to Redis channel: `coin.expiry.reminder`
+- Calls: `appointmentGateway.emitToRoom()` on `/appointment` namespace
+- Result: Other-server clients receive via Redis (100-500ms)
 
 #### F2. Socket event contract
 - Event name: `COIN_EXPIRY_REMINDER`
 - Enum: [../src/common/enum/socket-events.enum.ts](../src/common/enum/socket-events.enum.ts#L31)
+- **Namespace**: `/appointment` (where clients join rooms by email)
+
+> **🔧 Namespace Fix (Important)**  
+> Socket.IO rooms are **namespace-scoped**. Previous architecture failed because:
+> - Client connects to `/appointment` namespace and joins room `patient@email.com`
+> - Old listener used root `/` namespace to emit
+> - Rooms didn't match → message never reached client ❌
+> 
+> **Current fix**: Both direct listener and Redis listener emit on `/appointment` namespace
+> - Client in `/appointment` joins room by email
+> - Listeners emit to same namespace room → message delivered ✅
 
 Payload format (`DataResponse.data`) trả về cho client:
 ```json
