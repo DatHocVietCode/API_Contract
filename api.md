@@ -692,7 +692,8 @@ Response:
         "amount": 5000,
         "used": 2000,
         "remaining": 3000,
-        "expiresAt": "2026-04-20T00:00:00.000Z",
+        "createdAt": 1773196800000,
+        "expiresAt": 1776643200000,
         "category": "active",
         "isExpiringSoon": true
       }
@@ -704,7 +705,8 @@ Response:
 Notes:
 - **FEFO (First Expire, First Out)**: Spend consumes expiring lots first, sorted by `expiresAt ASC`, then non-expiring lots.
 - **Partial consumption**: A single spend can consume from multiple earn lots; the `used` field in each lot shows how much was allocated.
-- `category` can be `active`, `expired`, or `non_expiring` (when `expiresAt` is missing).
+- `createdAt` and `expiresAt` are epoch milliseconds in UTC; `expiresAt` is `null` for non-expiring lots.
+- `category` can be `active`, `expired`, or `non_expiring` (when `expiresAt` is `null`).
 - Expired lots are never allocated for spend; they remain in `expiredCoin` only.
 - `expiringSoon` counts remaining coin from active lots that expire within the next 7 days.
 - Breakdown order: expired lots first, then spendable lots in FEFO order.
