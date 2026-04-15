@@ -714,6 +714,59 @@ Notes:
 - `expiringSoon` counts remaining coin from active lots that expire within the next 7 days.
 - Breakdown order: expired lots first, then spendable lots in FEFO order.
 
+## Notifications
+
+### GET /notifications/by-email
+Description: Get paginated notifications of the authenticated user (plus broadcast notifications).
+Auth: Required (JWT)
+Query:
+- `page`: number (default 1)
+- `limit`: number (default 10)
+Response:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Notifications fetched successfully",
+  "data": {
+    "data": [
+      {
+        "_id": "...",
+        "title": "Thông báo coin sắp hết hạn",
+        "message": "Bạn có 10000 coin sắp hết hạn. Vui lòng sử dụng trước khi hết hạn.",
+        "isRead": false,
+        "receiverEmail": ["patient@example.com"],
+        "isBroadcast": false,
+        "details": {
+          "type": "coin_expiry_reminder",
+          "jobId": "...",
+          "transactionId": "...",
+          "amount": 10000,
+          "expiresAt": 1776269699780,
+          "runAt": 1776010499780,
+          "reminderDays": 3
+        },
+        "createdAt": 1776010500123,
+        "updatedAt": 1776010500123
+      }
+    ],
+    "total": 12,
+    "page": 1,
+    "limit": 10,
+    "totalPages": 2
+  }
+}
+```
+
+Notes:
+- `createdAt` and `updatedAt` are epoch milliseconds (UTC).
+- For coin expiry reminders, `details.expiresAt` and `details.runAt` are epoch milliseconds (UTC).
+- FE should render reminder time from `details.expiresAt` instead of parsing `message`.
+
+### PATCH /notifications/:id/read
+Description: Mark a notification as read.
+Auth: Required (JWT)
+Response: updated notification object with `createdAt` and `updatedAt` in epoch milliseconds.
+
 ## Profiles
 
 ### GET /profiles/:id
@@ -1024,17 +1077,53 @@ Current status:
 - Namespace exists and inherits JWT middleware.
 - No dedicated push events are currently emitted in the codebase.
 
+### Coin Expiry Reminder Realtime
+Purpose: push expiring-coin reminders without waiting for HTTP polling.
+
+Backend fanout path:
+- Worker emits internal event `notification.coin.expiry.reminder`
+- Realtime listener publishes payload to Redis channel `coin.expiry.reminder`
+- Socket listener subscribes Redis and emits Socket.IO event `COIN_EXPIRY_REMINDER` to room `<patientEmail>`
+
+Socket event:
+- `COIN_EXPIRY_REMINDER`
+
+Server payload:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Coin expiry reminder",
+  "data": {
+    "jobId": "...",
+    "transactionId": "...",
+    "patientId": "...",
+    "patientEmail": "patient@example.com",
+    "patientName": "Nguyen Van A",
+    "amount": 10000,
+    "expiresAt": 1776269699780,
+    "runAt": 1776010499780,
+    "reminderDays": 3,
+    "retryCount": 0
+  }
+}
+```
+
+Notes:
+- `expiresAt` and `runAt` are epoch milliseconds (UTC).
+- Client must connect socket with JWT and emit `JOIN_ROOM` before expecting this event.
+
 ## Notification And Wallet Realtime Notes
 
 Notification:
 - Notification module persists notification data on `notify.*` domain events.
 - It does not expose a dedicated notification socket namespace.
 - Realtime appointment/shift-related user alerts are delivered through `/appointment` socket events above.
+- Coin expiry reminder push is emitted via global socket event `COIN_EXPIRY_REMINDER` after Redis fanout.
 
 Wallet:
 - Wallet module currently has HTTP APIs (`/wallet/balance`, `/wallet/details`) and event-driven updates in service/listeners.
-- There is no dedicated wallet socket gateway/event for realtime balance change push.
-- FE should refresh wallet state via HTTP after booking/cancel/shift-cancel/payment update flows.
+- There is no dedicated realtime balance-delta event yet; FE should re-fetch wallet summary after receiving `COIN_EXPIRY_REMINDER` if balance UI is open.
+- FE should still refresh wallet state via HTTP after booking/cancel/shift-cancel/payment update flows.
 - Cancellation refund is now credited to `creditBalance`; coin reward/discount is tracked separately.
 
 ## FE Integration Checklist (Socket)
@@ -1043,7 +1132,8 @@ Wallet:
 2. Always pass JWT in handshake (`auth.token` preferred)
 3. Immediately emit `JOIN_ROOM` after connected for email-based push namespaces
 4. Subscribe to exact event names from `SocketEventsEnum` (case-sensitive)
-5. For wallet realtime, use HTTP re-fetch strategy because no wallet socket event exists yet
+5. Subscribe thêm `COIN_EXPIRY_REMINDER` và render thời gian từ epoch (`data.expiresAt`, `data.runAt`)
+6. Giữ polling `GET /notifications/by-email` như fallback khi mất kết nối socket hoặc app resume nền
 
 ## System
 

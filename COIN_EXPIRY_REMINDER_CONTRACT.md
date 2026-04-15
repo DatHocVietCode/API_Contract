@@ -15,9 +15,15 @@ Nguồn cấu hình ở [../src/wallet/coin-expiry-reminder/coin-expiry-reminder
 
 - `RABBITMQ_QUEUE_NAME` -> mặc định `coin.expiry.reminder.jobs` (L8)
 - `RABBITMQ_EXCHANGE` -> mặc định `coin.expiry.reminder.jobs` (L9)
-- `EXPIRY_REMINDER_DAYS` -> mặc định `3` (L13)
-- `SCHEDULER_INTERVAL_MS` -> mặc định `60000` ms, min `10000` ms (L14)
-- `MAX_RETRY` -> mặc định `3`, min `1` (L15)
+- `COIN_EXPIRY_REMINDER_QUEUE` -> override queue riêng cho coin reminder (fallback `RABBITMQ_QUEUE_NAME`)
+- `COIN_EXPIRY_REMINDER_EXCHANGE` -> override exchange riêng cho coin reminder (fallback `RABBITMQ_EXCHANGE`)
+- `COIN_EXPIRY_REMINDER_REDIS_CHANNEL` -> channel pub/sub Redis cho realtime fanout
+- `COIN_EXPIRY_REMINDER_DAYS` -> số ngày nhắc trước khi hết hạn (fallback `EXPIRY_REMINDER_DAYS`)
+- `COIN_EXPIRY_REMINDER_SCHEDULER_INTERVAL_MS` -> polling interval scheduler (fallback `SCHEDULER_INTERVAL_MS`)
+- `COIN_EXPIRY_REMINDER_MAX_RETRY` -> số lần retry worker (fallback `MAX_RETRY`)
+- `COIN_EXPIRY_REMINDER_DISPATCH_BUFFER_MS` -> buffer để tránh miss job đúng ngưỡng
+- `COIN_EXPIRY_REMINDER_DISPATCH_LOCK_TTL_SECONDS` -> TTL lock dispatch
+- `COIN_EXPIRY_REMINDER_PROCESS_LOCK_TTL_SECONDS` -> TTL lock process
 
 ## 3. Mongo Source of Truth
 
@@ -153,6 +159,26 @@ Trong `handleDispatch(...)` consumer:
 #### F2. Socket event contract
 - Event name: `COIN_EXPIRY_REMINDER`
 - Enum: [../src/common/enum/socket-events.enum.ts](../src/common/enum/socket-events.enum.ts#L31)
+
+Payload format (`DataResponse.data`) trả về cho client:
+```json
+{
+  "jobId": "...",
+  "transactionId": "...",
+  "patientId": "...",
+  "patientEmail": "patient@example.com",
+  "patientName": "Nguyen Van A",
+  "amount": 10000,
+  "expiresAt": 1776269699780,
+  "runAt": 1776010499780,
+  "reminderDays": 3,
+  "retryCount": 0
+}
+```
+
+Quy ước thời gian:
+- `expiresAt` và `runAt` là epoch milliseconds UTC.
+- Client không parse thời gian từ `message`; luôn render từ epoch fields.
 
 ## 5. Module Bootstrap Graph
 
