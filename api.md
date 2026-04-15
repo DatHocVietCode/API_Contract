@@ -630,6 +630,9 @@ Body: `reason`: string
 
 ## Wallet
 
+Reference:
+- Detailed lifecycle/phase contract for coin expiry reminder: `COIN_EXPIRY_REMINDER_CONTRACT.md`
+
 ### GET /wallet/balance
 Description: Get wallet balance for authenticated patient.
 Auth: Required (JWT)
