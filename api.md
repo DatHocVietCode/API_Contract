@@ -10,6 +10,29 @@ Datetime validation note:
 - Internal processing normalizes datetimes to UTC and converts to epoch milliseconds.
 - Exception: path parameters that represent date-only filters may require `YYYY-MM-DD` by endpoint contract.
 
+## Notification Realtime Contract
+
+- Namespace: `/notification`
+- Unified socket event: `NOTIFICATION_RECEIVED`
+- Payload: `NotificationPayload` discriminated union (see `README_NOTIFICATION_UNIFIED_SOCKET.md`)
+- Transport flow: `RabbitMQ(notification.jobs) -> Notification Consumer -> Handler Registry -> Redis(notification) -> Socket emit`
+
+Typed keys currently supported by `NotificationMap`:
+- `COIN_EXPIRY_REMINDER`
+- `APPOINTMENT_SUCCESS`
+- `APPOINTMENT_CANCELLED`
+- `PAYMENT_SUCCESS`
+
+Legacy socket events remain temporarily for backward compatibility but are deprecated for notification bell sync:
+- `COIN_EXPIRY_REMINDER`
+- `APPOINTMENT_BOOKING_SUCCESS`
+- `APPOINTMENT_BOOKING_PENDING`
+- `APPOINTMENT_BOOKING_FAILED`
+- `APPOINTMENT_CANCELLED`
+- `SHIFT_CANCELLED`
+- `PAYMENT_UPDATE`
+- `PAYMENT_VNPAY_URL_CREATED`
+
 ## Auth
 
 ### POST /auth/register
