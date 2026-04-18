@@ -1024,6 +1024,21 @@ Presence and lifecycle:
 - TTL is a fallback safety net only; the device set remains the source of truth for online state.
 - FE should emit `heartbeat` periodically (recommended every 25-30 seconds) while socket is connected.
 
+Old vs New connection flow:
+- Old flow:
+  - Connect socket.
+  - Emit `JOIN_ROOM`.
+  - Wait for `ROOM_JOINED`.
+  - Start business event exchange.
+- New flow:
+  - Connect socket with `handshake.auth.token`.
+  - Middleware verifies JWT before gateway lifecycle runs.
+  - On success, backend attaches `socket.data.userId` and accepts connection.
+  - Gateway lifecycle updates presence in Redis on connect/disconnect.
+  - Client can start namespace business events immediately after connect.
+  - `JOIN_ROOM` is still required only for email-room namespaces (`/appointment`, `/payment/vnpay`, `/patient-profile`, `/notification`).
+  - `JOIN_ROOM` is not the global handshake gate for all namespaces anymore.
+
 Room model:
 - User-targeted pushes are mostly sent to room by email.
 - After connected, client should emit `JOIN_ROOM` (no payload required).

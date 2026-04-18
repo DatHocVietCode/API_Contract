@@ -130,6 +130,21 @@ Supported events:
 2. Socket middleware verifies token before the gateway runs.
 3. `socket.data.userId` and `socket.data.authUser` are attached to the socket context.
 
+### 4.1.1 Old vs new handshake model (important for FE integration)
+
+Old model (legacy mindset):
+1. Connect socket.
+2. Emit `JOIN_ROOM`.
+3. Wait for `ROOM_JOINED`.
+4. Start business exchange.
+
+New model (current):
+1. Connect with `handshake.auth.token`.
+2. Middleware is the authentication gate and accepts/rejects before gateway handlers.
+3. Presence lifecycle is handled on connect/disconnect using `socket.data.userId`.
+4. For `/chat`, client should use `CHAT_JOIN_USER` and `CHAT_JOIN_CONVERSATION` as room events.
+5. `JOIN_ROOM` is not required for `/chat` and is not the global gate anymore.
+
 ### 4.2 Room model
 - Personal room: `user:{accountId}`
 - Conversation room: `conv:{conversationId}`
