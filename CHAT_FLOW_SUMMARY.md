@@ -14,7 +14,7 @@ Scope: Backend chat implementation in ute-doctor-be and documented contract in a
 - Realtime fanout can run in direct socket mode or Redis pub/sub mode (`chat.message`).
 - Auth:
   - HTTP: `JwtAuthGuard` + `req.user` (`AuthUser`).
-  - Socket: JWT is validated in BaseGateway middleware; payload is injected into `socket.data.user` and accessed by `@WsUser()`.
+  - Socket: JWT is validated by Socket.IO middleware, `socket.data.userId` is set for lifecycle handling, and the normalized payload is exposed to `@WsUser()` through `socket.data.authUser`.
 
 ### 1.1 Operating modes (incremental migration)
 
@@ -127,8 +127,8 @@ Supported events:
 
 ### 4.1 Connection and auth
 1. Client connects to `/chat` with JWT.
-2. Base gateway middleware verifies token.
-3. User payload is attached to socket context.
+2. Socket middleware verifies token before the gateway runs.
+3. `socket.data.userId` and `socket.data.authUser` are attached to the socket context.
 
 ### 4.2 Room model
 - Personal room: `user:{accountId}`
