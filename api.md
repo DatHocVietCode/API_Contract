@@ -509,7 +509,7 @@ Query: `q`, `role`, `limit`
 
 ### Realtime Socket Contract (`/chat` namespace)
 Connection auth:
-- JWT token in `handshake.auth.token` (or `Authorization: Bearer <token>`).
+- JWT token in `handshake.auth.token`.
 
 Main rooms:
 - Personal room: `user:{accountId}`
@@ -1022,6 +1022,7 @@ Presence and lifecycle:
 - `heartbeat` is a client event that refreshes Redis TTL for the current user's device set.
 - Presence is tracked with `user:{userId}:devices` as a multi-device SET and `online_users` as the online-user index.
 - TTL is a fallback safety net only; the device set remains the source of truth for online state.
+- FE should emit `heartbeat` periodically (recommended every 25-30 seconds) while socket is connected.
 
 Room model:
 - User-targeted pushes are mostly sent to room by email.
@@ -1109,6 +1110,10 @@ Presence event names reserved in the shared socket enum:
 - `user_online` (server event, reserved for future extensions)
 - `user_offline` (server event, reserved for future extensions)
 
+Current note for FE:
+- `user_online` and `user_offline` are reserved and not emitted yet.
+- Do not block presence UI on these two events; rely on existing domain events + HTTP fallback.
+
 ### Coin Expiry Reminder Realtime
 Purpose: push expiring-coin reminders without waiting for HTTP polling.
 
@@ -1166,6 +1171,7 @@ Wallet:
 4. Subscribe to exact event names from `SocketEventsEnum` (case-sensitive)
 5. Subscribe thêm `COIN_EXPIRY_REMINDER` và render thời gian từ epoch (`data.expiresAt`, `data.runAt`)
 6. Giữ polling `GET /notifications/by-email` như fallback khi mất kết nối socket hoặc app resume nền
+7. Emit `heartbeat` định kỳ (25-30s) cho các namespace có kết nối dài để giữ presence TTL
 
 ## System
 
