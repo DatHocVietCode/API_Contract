@@ -1007,6 +1007,9 @@ Notes:
 
 ## WebSocket (Socket.IO)
 
+Detailed backend refactor note:
+- See `README_SOCKET_REFACTOR_BE.md` for old/new architecture, pros/cons, presence model, and heartbeat diagnostics.
+
 Transport:
 - Socket.IO (NestJS WebSocket gateway)
 - Default Socket.IO path: `/socket.io`
