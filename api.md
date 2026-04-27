@@ -41,7 +41,7 @@ Auth: Public
 Request Body:
 - `email`: string
 - `password`: string
-- `role`: `PATIENT | DOCTOR` (optional, default `PATIENT`)
+- `role`: `PATIENT | DOCTOR | RECEPTIONIST` (optional, default `PATIENT`)
 - `chuyenKhoaId`: string (optional)
 - `degree`: string (optional)
 - `yearsOfExperience`: number (optional)
@@ -146,6 +146,11 @@ Access token expiry handling for FE:
 - Protected endpoints return `401` when access token is invalid/expired.
 - FE should call `POST /auth/refresh` with refresh token, update access token, then retry the failed request.
 
+JWT payload notes for FE:
+- Access token payload includes `role`.
+- Receptionist-only APIs require `role = RECEPTIONIST`.
+- If token is valid but role is not allowed, API returns `403 Forbidden`.
+
 ## Users / Accounts
 
 ### GET /users
@@ -192,6 +197,118 @@ Description: Update account status.
 Auth: Public
 Body:
 - `status`: enum
+
+## Receptionist
+
+Role authorization:
+- All endpoints below require JWT and `role = RECEPTIONIST`.
+- Unauthorized responses:
+  - `401`: missing/invalid/expired JWT
+  - `403`: authenticated but role is not `RECEPTIONIST`
+
+### GET /receptionist/test
+Description: Health-check endpoint for receptionist module integration.
+Auth: Required (JWT, RECEPTIONIST)
+Response:
+```json
+{ "message": "Receptionist module working" }
+```
+
+### GET /receptionist/visits
+Description: Fetch receptionist visit list for FE workflow integration.
+Auth: Required (JWT, RECEPTIONIST)
+Current data source:
+- Reuses appointment records (latest first, max 50 records in current implementation).
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched receptionist visits successfully",
+  "data": [
+    {
+      "_id": "...",
+      "appointmentStatus": "PENDING",
+      "scheduledAt": 1776650400000,
+      "paymentMethod": "ONLINE",
+      "consultationFee": 100000,
+      "paymentAmount": 90000
+    }
+  ]
+}
+```
+
+### GET /receptionist/billing/:visitId
+Description: Fetch billing snapshot for one visit.
+Auth: Required (JWT, RECEPTIONIST)
+Params:
+- `visitId`: appointment id
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched billing successfully",
+  "data": {
+    "visitId": "...",
+    "appointmentStatus": "CONFIRMED",
+    "paymentMethod": "CREDIT",
+    "originalAmount": 100000,
+    "discountAmount": 10000,
+    "finalAmount": 90000,
+    "paidAt": "2026-04-27T08:00:00.000Z"
+  }
+}
+```
+Response (Error):
+```json
+{
+  "statusCode": 404,
+  "message": "Visit not found",
+  "error": "Not Found"
+}
+```
+
+### POST /receptionist/payment/mock
+Description: Temporary endpoint to simulate payment success for receptionist workflow.
+Auth: Required (JWT, RECEPTIONIST)
+Body:
+- `visitId`: string (optional)
+- `amount`: number (optional)
+
+Behavior:
+- If `visitId` is omitted: returns simulated success payload without DB update.
+- If `visitId` is provided:
+  - resolves the visit from appointment collection
+  - sets mock payment metadata (`paidAt`, `paymentResponseCode=MOCK_SUCCESS`, `paymentTransactionStatus=MOCK_COMPLETED`)
+  - upgrades status from `PENDING|FAILED -> CONFIRMED` in temporary mock flow
+
+Response (Success without visitId):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Mock payment simulated",
+  "data": {
+    "visitId": null,
+    "status": "COMPLETED",
+    "amount": 100000,
+    "simulated": true
+  }
+}
+```
+
+Response (Success with visitId):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Mock payment completed",
+  "data": {
+    "visitId": "...",
+    "status": "CONFIRMED",
+    "amount": 90000,
+    "paidAt": "2026-04-27T08:00:00.000Z",
+    "simulated": true
+  }
+}
+```
 
 ## Appointments
 
