@@ -356,6 +356,9 @@ Body: `AppointmentBookingRequestDto`
 - `doctor`: { `id`, `name`, `email` } (doctor id required)
 - `serviceType`: enum
 - `paymentMethod`: `ONLINE | VNPAY | CREDIT | CASH | OFFLINE` (`COIN` is deprecated)
+- `visitType`: `OFFLINE` (optional, defaults to `OFFLINE`)
+- `paymentCategory`: `BHYT | DICH_VU` (optional)
+- `depositAmount`: number (optional, non-negative)
 - `amount`: number (optional)
 - `reasonForAppointment`: string (optional)
 - `coinsToUse`: number (optional, requested coin discount amount)
@@ -364,6 +367,10 @@ Semantics:
 - `appointmentDate`: Represents when the medical visit is scheduled to happen.
 - `bookingDate`: Represents when the booking request is created/recorded.
 - Backward compatibility: `date` is still accepted temporarily and treated as `appointmentDate` when `appointmentDate` is missing.
+- Backward compatibility: legacy payment fields (`paymentMethod`, `coinsToUse`, `useCoin`) remain active and unchanged.
+- Visit-based payment rules:
+  - If `paymentCategory = BHYT`, backend normalizes `depositAmount = 0`.
+  - If `paymentCategory = DICH_VU`, backend accepts provided `depositAmount`.
 Core flow:
 - Validate request
 - Acquire Redis slot lock `SET slot:{doctorId}:{timeSlotId} NX EX 300`
@@ -392,6 +399,9 @@ Request examples:
     "email": "doctor@example.com"
   },
   "serviceType": "KHAM_DICH_VU",
+  "visitType": "OFFLINE",
+  "paymentCategory": "DICH_VU",
+  "depositAmount": 100000,
   "paymentMethod": "ONLINE",
   "amount": 100000,
   "reasonForAppointment": "Tai kham dinh ky"
@@ -488,6 +498,7 @@ Notes:
 - If both `appointmentDate` and deprecated `date` are provided, `appointmentDate` takes precedence.
 - `paymentMethod=COIN` is deprecated and rejected. Use `useCoin=true` with `ONLINE|VNPAY|CREDIT`.
 - Coin used in booking is discount-only and never treated as standalone payment.
+- Response shape is unchanged for backward compatibility (`code`, `message`, `data` with amount breakdown fields when applicable).
 
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.

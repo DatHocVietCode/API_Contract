@@ -3,6 +3,25 @@
 Date: 2026-04-08
 Scope: Backend booking flow hardening in Appointment module + VNPay callback/payment status integration
 
+## Update 2026-04-27 (Visit-Based Workflow Fields)
+
+Scope: Extend booking request contract for receptionist/visit workflow without breaking legacy payment flow.
+
+### What changed
+
+- Added optional booking request fields:
+  - `visitType`: `OFFLINE`
+  - `paymentCategory`: `BHYT | DICH_VU`
+  - `depositAmount`: non-negative number
+- Backend normalization rules:
+  - If `paymentCategory = BHYT`, `depositAmount` is normalized to `0`.
+  - If `paymentCategory = DICH_VU`, `depositAmount` is accepted as provided (after sanitization).
+- Legacy fields remain unchanged and supported:
+  - `paymentMethod`
+  - `coinsToUse`
+  - `useCoin`
+- Booking response shape is unchanged for compatibility with existing FE clients.
+
 ## Update 2026-04-14 (Coin/Credit Separation)
 
 Scope: Separate reward coin from financial credit for safer accounting and FE consistency.
