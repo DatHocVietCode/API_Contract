@@ -215,10 +215,14 @@ Response:
 ```
 
 ### GET /receptionist/visits
-Description: Fetch receptionist visit list for FE workflow integration.
+Description: Fetch today's receptionist visit list for check-in workflow.
 Auth: Required (JWT, RECEPTIONIST)
-Current data source:
-- Reuses appointment records (latest first, max 50 records in current implementation).
+Query: none
+Filter rule:
+- Uses `appointment.scheduledAt` as the source of truth.
+- Returns visits scheduled for the current day in UTC.
+Sort:
+- ascending by `scheduledAt`
 Response (Success):
 ```json
 {
@@ -226,14 +230,46 @@ Response (Success):
   "message": "Fetched receptionist visits successfully",
   "data": [
     {
-      "_id": "...",
-      "appointmentStatus": "PENDING",
+      "visitId": "...",
+      "appointmentId": "...",
+      "status": "CREATED",
       "scheduledAt": 1776650400000,
-      "paymentMethod": "ONLINE",
-      "consultationFee": 100000,
-      "paymentAmount": 90000
+      "patientName": "Nguyen Van A",
+      "doctorName": "Dr. B",
+      "appointmentStatus": "CONFIRMED"
     }
   ]
+}
+```
+
+### PATCH /receptionist/visits/:visitId/check-in
+Description: Mark a visit as checked in.
+Auth: Required (JWT, RECEPTIONIST)
+Body: empty object `{}`
+
+Validation rules:
+- Visit must exist.
+- Visit status must be `CREATED`.
+- Linked appointment status must be `CONFIRMED`.
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Visit checked in successfully",
+  "data": {
+    "visitId": "...",
+    "status": "CHECKED_IN"
+  }
+}
+```
+
+Response (Error):
+```json
+{
+  "statusCode": 409,
+  "message": "Visit can only be checked in from CREATED",
+  "error": "Conflict"
 }
 ```
 
