@@ -310,6 +310,68 @@ Response (Success with visitId):
 }
 ```
 
+## Visits (Phase 2 Additive)
+
+Purpose:
+- Introduce `Visit` as a dedicated examination-lifecycle entity.
+- Keep appointment booking/payment flow unchanged in this phase.
+- One appointment has exactly one visit (`appointmentId` unique index).
+
+Visit schema (Mongo):
+- `id`
+- `appointmentId` (unique)
+- `doctorId`
+- `patientId`
+- `status`: `CREATED | CHECKED_IN | IN_PROGRESS | COMPLETED`
+- `startedAt` (epoch ms UTC)
+- `completedAt` (epoch ms UTC)
+
+Creation trigger:
+- Visit is created by event listener on `appointment.booking.success`.
+- Creation is idempotent by `appointmentId` (duplicate-safe on retries/re-delivery).
+
+Status flow:
+- `CREATED -> CHECKED_IN -> IN_PROGRESS -> COMPLETED`
+
+Validation rules:
+- Cannot `CHECKED_IN` if linked `appointment.appointmentStatus !== CONFIRMED`.
+- Cannot move to `IN_PROGRESS` unless current visit status is `CHECKED_IN`.
+- Cannot move to `COMPLETED` unless current visit status is `IN_PROGRESS`.
+
+Timestamp rules:
+- `startedAt` is set when visit status transitions to `IN_PROGRESS`.
+- `completedAt` is set when visit status transitions to `COMPLETED`.
+
+### PATCH /receptionist/visits/:visitId/check-in
+Description: Receptionist check-in operation for a created visit.
+Auth: Required (JWT, RECEPTIONIST)
+Body: empty object `{}` (reserved for forward compatibility)
+
+Behavior:
+- Allowed only for `CREATED -> CHECKED_IN` transition.
+- Rejects if the linked appointment is not `CONFIRMED`.
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Visit checked in successfully",
+  "data": {
+    "visitId": "...",
+    "status": "CHECKED_IN"
+  }
+}
+```
+
+Response (Error - invalid transition):
+```json
+{
+  "statusCode": 400,
+  "message": "Visit can only be CHECKED_IN from CREATED",
+  "error": "Bad Request"
+}
+```
+
 ## Appointments
 
 ### GET /appointment/completed/doctor
