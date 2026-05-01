@@ -273,6 +273,129 @@ Response (Error):
 }
 ```
 
+## Doctor (Phase 3 Visit-Based Workflow)
+
+Role authorization:
+- All endpoints below require JWT and `role = DOCTOR`.
+- Unauthorized responses:
+  - `401`: missing/invalid/expired JWT
+  - `403`: authenticated but role is not `DOCTOR` or doctor does not own the visit
+
+### GET /doctor/visits/today
+Description: Fetch today's visits for the authenticated doctor. Uses `Visit` as the primary data source and joins `Appointment` only for display fields (e.g., `scheduledAt`).
+Auth: Required (JWT, DOCTOR)
+Query: none
+
+Filter rules:
+- Only return visits where `status` IN [`CHECKED_IN`, `IN_PROGRESS`].
+- Exclude `CREATED` and `COMPLETED` visits.
+- Only return visits whose linked `appointment.scheduledAt` falls within the current UTC day.
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched today visits for doctor",
+  "data": [
+    {
+      "visitId": "...",
+      "appointmentId": "...",
+      "status": "CHECKED_IN",
+      "scheduledAt": 1776650400000,
+      "patientName": "Nguyen Van A",
+      "doctorName": "Dr. B",
+      "appointmentStatus": "CONFIRMED"
+    }
+  ]
+}
+```
+
+### PATCH /doctor/visits/:visitId/start
+Description: Mark a visit as started (doctor begins examination).
+Auth: Required (JWT, DOCTOR)
+Params:
+- `visitId`: string
+Body: empty
+
+Validation / Behavior:
+- Visit must exist.
+- Doctor ownership: the `doctorId` on the `Visit` (or linked `Appointment`) must match the authenticated doctor's id.
+- Allowed transition: `CHECKED_IN -> IN_PROGRESS` only.
+
+Idempotency:
+- If visit already `IN_PROGRESS` → return success (no-op).
+- If visit already `COMPLETED` → return `409 Conflict`.
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Visit started",
+  "data": { "visitId": "...", "status": "IN_PROGRESS" }
+}
+```
+
+Response (Errors):
+- `400 Bad Request` when `visitId` invalid or precondition not met.
+- `403 Forbidden` when doctor does not own the visit.
+- `404 Not Found` when visit not found.
+- `409 Conflict` when visit already completed.
+
+### POST /doctor/visits/:visitId/complete
+Description: Complete a visit and persist the medical encounter (diagnosis + prescriptions). This operation is wrapped in a MongoDB transaction.
+Auth: Required (JWT, DOCTOR)
+Params:
+- `visitId`: string
+Body (CompleteVisitDto):
+- `diagnosis`: string (optional)
+- `note`: string (optional)
+- `prescriptions`: array of items {
+  - `medicineId?`: string | null
+  - `medicineName?`: string | null
+  - `quantity`: number
+  - `note?`: string
+}
+
+Validation / Behavior:
+1. Visit must exist and `status === IN_PROGRESS`.
+2. Doctor ownership: `doctorId` must match the authenticated doctor.
+3. The backend MUST reuse the shared `MedicalEncounterService` to persist the encounter and prescriptions (preserve existing behavior such as medicine name fallback).
+4. The completion MUST run in a transaction that:
+   - calls the shared encounter writer
+   - updates `Visit.status` to `COMPLETED` and sets `completedAt` (epoch ms UTC)
+   - updates linked appointment/time slot states as needed
+5. After successful commit, emit event `domain.visit.completed` with payload `{ visitId, encounterId, completedAt }`.
+
+Idempotency:
+- If visit already `COMPLETED` → return `409 Conflict`.
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Visit completed",
+  "data": { "visitId": "...", "encounterId": "..." }
+}
+```
+
+Response (Errors):
+- `400 Bad Request` when preconditions fail (e.g., visit not IN_PROGRESS).
+- `403 Forbidden` when doctor does not own the visit.
+- `404 Not Found` when visit not found.
+- `409 Conflict` when visit already completed.
+
+Notes for FE integration:
+- FE must call the doctor endpoints using the authenticated doctor's token (contains `doctorId`).
+- FE should not act on visits with status `CREATED` or `COMPLETED`.
+- For completing a visit, FE should POST the diagnosis/prescription bundle and expect `encounterId` in response for navigation to medical records or prescription printing.
+
+### Appointment compatibility
+Description: Existing appointment-based completion endpoints are preserved for backward compatibility but act as wrappers only. They MUST:
+- resolve `visitId` from `appointmentId` when necessary
+- delegate to visit-based completion (`VisitService.completeVisit`)
+- NOT perform direct encounter persistence themselves (no duplication of business logic)
+
+
 ### GET /receptionist/billing/:visitId
 Description: Fetch billing snapshot for one visit.
 Auth: Required (JWT, RECEPTIONIST)
