@@ -396,24 +396,39 @@ Description: Existing appointment-based completion endpoints are preserved for b
 - NOT perform direct encounter persistence themselves (no duplication of business logic)
 
 
+### Receptionist — Billing APIs
+Purpose: Endpoints for receptionist to view and prepare billing for a completed visit. All endpoints below require JWT and `role = RECEPTIONIST`.
+
+Notes on paths used by the backend:
+- Fetch billing snapshot: `GET /receptionist/billing/:visitId` (visit-scoped)
+- Mutations operate on a persisted `Billing` resource by id: `PATCH /receptionist/billings/:billingId/*` and `POST /receptionist/billings/:billingId/finalize`.
+
 ### GET /receptionist/billing/:visitId
-Description: Fetch billing snapshot for one visit.
+Description: Fetch billing snapshot for one visit. If a `Billing` document has been created for the visit it will be returned; otherwise the endpoint may return a best-effort snapshot depending on implementation.
 Auth: Required (JWT, RECEPTIONIST)
 Params:
-- `visitId`: appointment id
+- `visitId`: string (appointment / visit id)
 Response (Success):
 ```json
 {
   "code": "SUCCESS",
   "message": "Fetched billing successfully",
   "data": {
+    "billingId": "...",        
     "visitId": "...",
-    "appointmentStatus": "CONFIRMED",
-    "paymentMethod": "CREDIT",
-    "originalAmount": 100000,
-    "discountAmount": 10000,
-    "finalAmount": 90000,
-    "paidAt": "2026-04-27T08:00:00.000Z"
+    "status": "DRAFT",
+
+    "consultationFee": 100000,
+    "medicationFee": 50000,
+    "totalAmount": 150000,
+
+    "insuranceAmount": 45000,
+    "depositUsed": 0,
+
+    "creditUsed": 0,
+    "coinUsed": 0,
+
+    "finalPayable": 105000
   }
 }
 ```
@@ -425,6 +440,137 @@ Response (Error):
   "error": "Not Found"
 }
 ```
+
+### PATCH /receptionist/billings/:billingId/apply-credit
+Description: Receptionist applies `credit` amount to an existing billing. This only modifies the billing draft and does NOT deduct credit from the wallet.
+Auth: Required (JWT, RECEPTIONIST)
+Params:
+- `billingId`: string
+Request Body:
+```json
+{ "creditToUse": 50000 }
+```
+Validation rules:
+- `creditToUse` must be a number >= 0
+- Billing `status` must be `DRAFT`
+- `creditToUse` must be <= remaining payable computed from stored base values (totalAmount, insuranceAmount, depositUsed, coinUsed)
+- Patient must have sufficient credit balance (checked, but not deducted)
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Credit applied",
+  "data": {
+    "billingId": "...",
+    "creditUsed": 50000,
+    "finalPayable": 55000
+  }
+}
+```
+
+### PATCH /receptionist/billings/:billingId/apply-coin
+Description: Receptionist applies `coin` amount to an existing billing. This only modifies the billing draft and does NOT deduct coin from the wallet.
+Auth: Required (JWT, RECEPTIONIST)
+Params:
+- `billingId`: string
+Request Body:
+```json
+{ "coinToUse": 20000 }
+```
+Validation rules:
+- `coinToUse` must be a number >= 0
+- Billing `status` must be `DRAFT`
+- `coinToUse` must be <= remaining payable after credit (computed from stored base values)
+- Patient must have sufficient available coin balance (checked, but not deducted)
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Coin applied",
+  "data": {
+    "billingId": "...",
+    "coinUsed": 20000,
+    "finalPayable": 35000
+  }
+}
+```
+
+### POST /receptionist/billings/:billingId/finalize
+Description: Finalize a billing before creating a payment record. Finalize locks the billing so pricing and applied discounts cannot be modified by receptionist flows.
+Auth: Required (JWT, RECEPTIONIST)
+Params:
+- `billingId`: string
+Validation rules:
+- Billing must exist
+- Billing `status` must be `DRAFT` to perform finalize (otherwise `BadRequest` unless already `FINALIZED`)
+- `finalPayable` must be >= 0
+
+Behavior:
+- Sets `billing.status = FINALIZED`
+- Idempotent: if already `FINALIZED`, returns success (no-op)
+- After `FINALIZED` the following are NOT allowed to change via receptionist endpoints: `creditUsed`, `coinUsed`, or any pricing fields
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Billing finalized",
+  "data": {
+    "billingId": "...",
+    "status": "FINALIZED"
+  }
+}
+```
+
+### DTOs (contract)
+Define the request/response shapes used by FE. Field names are camelCase and monetary values are numbers. Do NOT include internal Mongo fields like `_id` or `__v`.
+
+- `BillingResponseDto` (used by `GET /receptionist/billing/:visitId`)
+```ts
+interface BillingResponseDto {
+  billingId: string;
+  visitId: string;
+  status: 'DRAFT' | 'FINALIZED' | 'PAID';
+
+  consultationFee: number;
+  medicationFee: number;
+  totalAmount: number;
+
+  insuranceAmount: number;
+  depositUsed: number;
+
+  creditUsed: number;
+  coinUsed: number;
+
+  finalPayable: number;
+}
+```
+
+- `ApplyCreditRequestDto`
+```ts
+interface ApplyCreditRequestDto {
+  creditToUse: number; // >= 0
+}
+```
+
+- `ApplyCoinRequestDto`
+```ts
+interface ApplyCoinRequestDto {
+  coinToUse: number; // >= 0
+}
+```
+
+Rules:
+- DTO fields MUST match backend exactly
+- Use `number` for all monetary values
+- `visitId` and `billingId` are strings
+- Response wrapper remains `{ code, message, data }` and must be used for all responses above
+
+Backward compatibility:
+- These endpoints are additive and do not change existing appointment APIs.
+
 
 ### POST /receptionist/payment/mock
 Description: Temporary endpoint to simulate payment success for receptionist workflow.
