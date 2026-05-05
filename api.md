@@ -579,6 +579,45 @@ Body:
 - `visitId`: string (optional)
 - `amount`: number (optional)
 
+### GET /receptionist/payments/:billingId/qr
+Description: Create or return an existing QR payment URL for a finalized billing. The endpoint will create a single active `Payment` record for the `billingId` if none exists, then return a VNPay URL built with `billingId` as the canonical `txnRef` (no `amount` accepted from FE).
+Auth: Required (JWT, RECEPTIONIST)
+Params:
+- `billingId`: string
+Behavior / Validation:
+- `billing.status` must be `FINALIZED` before creating a QR payment (server will create the payment record on demand when needed).
+- FE MUST NOT send an `amount` — the backend derives `amount` from `billing.finalPayable`.
+Response (Success):
+```json
+{
+  "paymentId": "...",
+  "paymentUrl": "https://sandbox.vnpayment.vn/....",
+  "amount": 100000
+}
+```
+
+### POST /receptionist/payments/:paymentId/mark-paid
+Description: Receptionist marks a payment as paid via CASH. This endpoint is used for offline (cash) settlement and will, on success, mark `Payment.status = SUCCESS` and `Billing.status = PAID` and commit wallet deductions/rewards transactionally.
+Auth: Required (JWT, RECEPTIONIST)
+Params:
+- `paymentId`: string
+Behavior:
+- Idempotent: repeated calls on an already-committed payment return success without double-deducting wallets.
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Cash payment marked paid",
+  "data": {
+    "paymentId": "...",
+    "billingId": "...",
+    "status": "SUCCESS",
+    "amount": 100000,
+    "method": "CASH"
+  }
+}
+```
+
 Behavior:
 - If `visitId` is omitted: returns simulated success payload without DB update.
 - If `visitId` is provided:
@@ -1476,6 +1515,11 @@ Behavior:
 - Convert `vnp_PayDate` (VNPay GMT+7 format `yyyyMMddHHmmss`) to UTC before persisting.
 - Emit best-effort real-time event `payment:update` with payload `{ orderId, status }`.
 - Redirect user to frontend result page.
+
+Important notes (billing-based flow):
+- The backend now uses `vnp_TxnRef` as the canonical `billingId` (NOT `orderId`). VNPay callbacks will be resolved by `billingId` and the payment record is created for the billing resource.
+- On a successful VNPay callback the server will: set `Payment.status = SUCCESS` for the associated payment, set `Billing.status = PAID`, commit any wallet deductions (credit/coin) and coin reward, and emit `domain.payment.success` event.
+- FE MUST NOT rely on `orderId` for billing-based payments; the receptionist flow exposes the QR creation endpoint `GET /receptionist/payments/:billingId/qr` which returns `paymentId`, `paymentUrl`, and `amount`.
 
 Response:
 - No JSON body.
