@@ -403,6 +403,25 @@ Notes on paths used by the backend:
 - Fetch billing snapshot: `GET /receptionist/billing/:visitId` (visit-scoped)
 - Mutations operate on a persisted `Billing` resource by id: `PATCH /receptionist/billings/:billingId/*` and `POST /receptionist/billings/:billingId/finalize`.
 
+### Billing wallet summary for finalization
+Description: Staff-only billing-scoped wallet summary used by receptionist and admin finalize flows. The lookup is always constrained by `billingId`; clients cannot query an arbitrary patient wallet directly.
+Auth: Required (JWT, RECEPTIONIST or ADMIN)
+Path: `GET /billing/:billingId/wallet-summary`
+
+Response (Success):
+```json
+{
+  "availableCoins": 120000,
+  "availableCredit": 450000,
+  "maxApplicableDiscount": 30000
+}
+```
+
+Notes:
+- The backend resolves the billing record first, then the linked patient, then fetches a sanitized wallet summary internally.
+- `maxApplicableDiscount` is optional and only returned when the billing workflow can compute the current coin discount cap.
+- No wallet transaction history, ledger metadata, or reward details are exposed by this endpoint.
+
 ### GET /receptionist/billing/:visitId
 Description: Fetch billing snapshot for one visit. If a `Billing` document has been created for the visit it will be returned; otherwise the endpoint may return a best-effort snapshot depending on implementation.
 Auth: Required (JWT, RECEPTIONIST)
@@ -545,6 +564,15 @@ interface BillingResponseDto {
   coinUsed: number;
 
   finalPayable: number;
+}
+```
+
+- `WalletSummaryDto` (used by `GET /billing/:billingId/wallet-summary`)
+```ts
+interface WalletSummaryDto {
+  availableCoins: number;
+  availableCredit: number;
+  maxApplicableDiscount?: number;
 }
 ```
 
