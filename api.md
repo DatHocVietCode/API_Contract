@@ -411,9 +411,13 @@ Path: `GET /billing/:billingId/wallet-summary`
 Response (Success):
 ```json
 {
-  "availableCoins": 120000,
-  "availableCredit": 450000,
-  "maxApplicableDiscount": 30000
+  "code": "SUCCESS",
+  "message": "Fetched wallet summary successfully",
+  "data": {
+    "availableCoins": 120000,
+    "availableCredit": 450000,
+    "maxApplicableDiscount": 30000
+  }
 }
 ```
 
