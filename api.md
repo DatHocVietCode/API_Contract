@@ -521,19 +521,54 @@ Response (Success):
 ```
 
 ### POST /receptionist/billings/:billingId/finalize
-Description: Finalize a billing before creating a payment record. Finalize locks the billing so pricing and applied discounts cannot be modified by receptionist flows.
+Description: Finalize a billing with optional medication fulfillment adjustments. Receptionist confirms actual dispensed quantities and sources before finalization. Finalize locks the billing so pricing and applied discounts cannot be modified.
 Auth: Required (JWT, RECEPTIONIST)
 Params:
 - `billingId`: string
+Request Body:
+```json
+{
+  "medications": [
+    {
+      "medicineId": "...",
+      "dispensedQty": 10,
+      "source": "CLINIC"
+    },
+    {
+      "medicineId": "...",
+      "dispensedQty": 0,
+      "source": "CLINIC"
+    },
+    {
+      "medicineId": "...",
+      "dispensedQty": 5,
+      "source": "OUTSIDE_PURCHASE"
+    }
+  ]
+}
+```
 Validation rules:
 - Billing must exist
 - Billing `status` must be `DRAFT` to perform finalize (otherwise `BadRequest` unless already `FINALIZED`)
-- `finalPayable` must be >= 0
+- Each medication in fulfillment:
+  - `dispensedQty` must be >= 0
+  - `source` must be one of: `CLINIC`, `OUTSIDE_PURCHASE`
+- `finalPayable` computed after fulfillment must be >= 0
 
 Behavior:
-- Sets `billing.status = FINALIZED`
+- Applies fulfillment changes to medications[] in billing:
+  - Updates `dispensedQty` and `source` for each medication matched by `medicineId`
+  - Recalculates `lineTotal` per medication:
+    - If `source = OUTSIDE_PURCHASE`: `lineTotal = 0` (patient paid outside, no clinic charge)
+    - If `dispensedQty = 0`: `lineTotal = 0` (not dispensed)
+    - Otherwise: `lineTotal = dispensedQty * unitPrice` (from price snapshot)
+- Recomputes `medicationFee` as sum of all `lineTotal` values
+- Recomputes `totalAmount = consultationFee + medicationFee`
+- Recomputes `insuranceAmount` and `finalPayable` based on new `totalAmount`
+- Sets `billing.status = FINALIZED` (immutable snapshot)
+- Creates a payment record and prepares for payment flow
 - Idempotent: if already `FINALIZED`, returns success (no-op)
-- After `FINALIZED` the following are NOT allowed to change via receptionist endpoints: `creditUsed`, `coinUsed`, or any pricing fields
+- After `FINALIZED` the following are NOT allowed to change via receptionist endpoints: `creditUsed`, `coinUsed`, `medications[]`, or any pricing fields
 
 Response (Success):
 ```json
@@ -542,7 +577,11 @@ Response (Success):
   "message": "Billing finalized",
   "data": {
     "billingId": "...",
-    "status": "FINALIZED"
+    "status": "FINALIZED",
+    "paymentId": "...",
+    "paymentStatus": "PENDING",
+    "amount": 85000,
+    "method": "QR"
   }
 }
 ```
