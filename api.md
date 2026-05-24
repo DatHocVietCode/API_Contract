@@ -451,7 +451,19 @@ Response (Success):
     "creditUsed": 0,
     "coinUsed": 0,
 
-    "finalPayable": 105000
+    "finalPayable": 105000,
+
+    "medications": [
+      {
+        "medicineId": "...",
+        "medicineName": "Paracetamol 500mg",
+        "prescribedQty": 10,
+        "dispensedQty": 10,
+        "unitPrice": 5000,
+        "source": "CLINIC",
+        "lineTotal": 50000
+      }
+    ]
   }
 }
 ```
@@ -607,6 +619,17 @@ interface BillingResponseDto {
   coinUsed: number;
 
   finalPayable: number;
+  medications: BillingMedicationDto[];
+}
+
+interface BillingMedicationDto {
+  medicineId: string | null;
+  medicineName: string;
+  prescribedQty: number;
+  dispensedQty: number;
+  unitPrice: number;
+  source: 'CLINIC' | 'OUTSIDE_PURCHASE';
+  lineTotal: number;
 }
 ```
 
