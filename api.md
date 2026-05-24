@@ -1063,7 +1063,7 @@ Visit-based cancellation rules:
 - Cancellation is blocked once the visit is `CHECKED_IN`, `IN_PROGRESS`, `COMPLETED`, or any status other than `CREATED`.
 - Cancellation is blocked if a `MedicalEncounter`, `Billing`, or related `Payment` exists.
 - On success, backend sets `Appointment.status = CANCELLED`, `Visit.status = CANCELLED`, and releases the `TimeSlotLog` to `available`.
-- Refund credit is issued only for actual collected deposit/payment evidence. Deferred billing amounts are not refunded from appointment cancellation.
+- Appointment cancellation does not issue CreditWallet refunds. Any financial adjustment must be handled by a separate billing/payment refund flow.
 
 Blocked reason codes:
 - `APPOINTMENT_NOT_CANCELABLE`
