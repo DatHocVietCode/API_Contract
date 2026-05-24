@@ -1057,6 +1057,22 @@ Body:
 - `appointmentId`: string
 - `reason`: string (optional)
 
+Visit-based cancellation rules:
+- Appointment status must be `PENDING` or `CONFIRMED`.
+- Linked `Visit` must exist and have status `CREATED`.
+- Cancellation is blocked once the visit is `CHECKED_IN`, `IN_PROGRESS`, `COMPLETED`, or any status other than `CREATED`.
+- Cancellation is blocked if a `MedicalEncounter`, `Billing`, or related `Payment` exists.
+- On success, backend sets `Appointment.status = CANCELLED`, `Visit.status = CANCELLED`, and releases the `TimeSlotLog` to `available`.
+- Refund credit is issued only for actual collected deposit/payment evidence. Deferred billing amounts are not refunded from appointment cancellation.
+
+Blocked reason codes:
+- `APPOINTMENT_NOT_CANCELABLE`
+- `VISIT_ALREADY_STARTED`
+- `VISIT_COMPLETED`
+- `MEDICAL_ENCOUNTER_EXISTS`
+- `BILLING_EXISTS`
+- `PAYMENT_EXISTS`
+
 ### PATCH /appointment/:id/confirm
 Description: Confirm appointment.
 Auth: Public
