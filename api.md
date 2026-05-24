@@ -452,6 +452,7 @@ Response (Success):
     "coinUsed": 0,
 
     "finalPayable": 105000,
+    "paymentCategory": "BHYT",
 
     "medications": [
       {
@@ -619,6 +620,7 @@ interface BillingResponseDto {
   coinUsed: number;
 
   finalPayable: number;
+  paymentCategory: 'BHYT' | 'DICH_VU' | null;
   medications: BillingMedicationDto[];
 }
 
@@ -879,7 +881,7 @@ Core flow:
   - `originalAmount = amount`
   - `discountAmount = min(availableCoin, requestedCoin?, originalAmount * 10%, 30000)` when `useCoin=true`
   - `finalAmount = originalAmount - discountAmount`
-- Create appointment with `PENDING`, persist `coinDiscountAmount`, `paymentAmount=finalAmount`, and mark timeslot `booked` in a MongoDB transaction
+- Create appointment with `PENDING`, persist `paymentCategory`, `depositAmount`, `coinDiscountAmount`, `paymentAmount=finalAmount`, and mark timeslot `booked` in a MongoDB transaction
 - If `discountAmount > 0`, deduct coin as discount transaction
 - Process remaining `finalAmount` by payment method (`ONLINE|VNPAY` async, `CREDIT` sync)
 - For online payment, create an idempotent payment record per appointment before generating payment URL
