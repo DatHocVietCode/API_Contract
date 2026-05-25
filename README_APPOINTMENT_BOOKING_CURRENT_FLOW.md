@@ -1,5 +1,7 @@
 # Appointment Booking Module - Current End-to-End Flow
 
+> Status note (2026-05-25): this historical flow document still contains older appointment-based payment details in later sections. For current integration, prefer `api.md` and the backend repository document `docs/CURRENT_APPOINTMENT_VISIT_BILLING_FLOW.md`. Current code uses DICH_VU appointment deposit payment (`Payment.purpose=APPOINTMENT_DEPOSIT`) before confirmation, and billing payment (`Payment.purpose=BILLING`) after billing finalization.
+
 This document describes the **current implementation** of appointment booking in the backend.
 
 Purpose:

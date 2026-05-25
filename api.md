@@ -635,6 +635,12 @@ interface BillingMedicationDto {
 }
 ```
 
+Deposit semantics:
+- `depositUsed` is derived only from a verified appointment deposit.
+- Backend uses `Appointment.depositPaidAmount` only when `Appointment.depositStatus = PAID`.
+- `Appointment.depositAmount` is only the required/intended deposit and must not be treated as collected money by FE.
+- If deposit is unpaid, failed, or not required, billing draft uses `depositUsed = 0`.
+
 - `WalletSummaryDto` (used by `GET /billing/:billingId/wallet-summary`)
 ```ts
 interface WalletSummaryDto {
@@ -859,40 +865,38 @@ Body: `AppointmentBookingRequestDto`
 - `serviceType`: enum
 - `paymentMethod`: `ONLINE | VNPAY | CREDIT | CASH | OFFLINE` (`COIN` is deprecated)
 - `visitType`: `OFFLINE` (optional, defaults to `OFFLINE`)
-- `paymentCategory`: `BHYT | DICH_VU` (optional)
-- `depositAmount`: number (optional, non-negative)
-- `amount`: number (optional)
+- `paymentCategory`: `BHYT | DICH_VU` (optional; defaults to `DICH_VU`)
+- `depositAmount`: number (required and > 0 for `DICH_VU`; normalized to `0` for `BHYT`)
 - `reasonForAppointment`: string (optional)
-- `coinsToUse`: number (optional, requested coin discount amount)
-- `useCoin`: boolean (optional, apply coin discount)
+- `amount`: deprecated optional number. New clients must not send it; backend ignores it for deposit/payment evidence.
+- `coinsToUse`: deprecated optional number. Booking-time coin discount is not part of the deposit payment flow.
+- `useCoin`: deprecated optional boolean. Billing has its own coin application flow.
 Semantics:
 - `appointmentDate`: Represents when the medical visit is scheduled to happen.
 - `bookingDate`: Represents when the booking request is created/recorded.
 - Backward compatibility: `date` is still accepted temporarily and treated as `appointmentDate` when `appointmentDate` is missing.
-- Backward compatibility: legacy payment fields (`paymentMethod`, `coinsToUse`, `useCoin`) remain active and unchanged.
-- Visit-based payment rules:
+- `amount` is no longer part of the new booking contract and is not proof of paid money.
+- Consultation fee comes from server-side policy/config, not client `amount`.
+- Deposit rules:
   - If `paymentCategory = BHYT`, backend normalizes `depositAmount = 0`.
-  - If `paymentCategory = DICH_VU`, backend accepts provided `depositAmount`.
+  - If `paymentCategory = DICH_VU`, `depositAmount > 0` is required and is paid through VNPay before confirmation.
+  - `depositAmount` is the required/intended deposit.
+  - `depositPaidAmount` with `depositStatus=PAID` is the actual deposit evidence used by billing.
 Core flow:
-- Validate request
-- Acquire Redis slot lock `SET slot:{doctorId}:{timeSlotId} NX EX 300`
-- Pre-check slot in database for same `(doctorId, appointmentDate, timeSlot)` with status in `PENDING|CONFIRMED`
-- Calculate amount breakdown:
-  - `originalAmount = amount`
-  - `discountAmount = min(availableCoin, requestedCoin?, originalAmount * 10%, 30000)` when `useCoin=true`
-  - `finalAmount = originalAmount - discountAmount`
-- Create appointment with `PENDING`, persist `paymentCategory`, `depositAmount`, `coinDiscountAmount`, `paymentAmount=finalAmount`, and mark timeslot `booked` in a MongoDB transaction
-- If `discountAmount > 0`, deduct coin as discount transaction
-- Process remaining `finalAmount` by payment method (`ONLINE|VNPAY` async, `CREDIT` sync)
-- For online payment, create an idempotent payment record per appointment before generating payment URL
-- If payment success (or `finalAmount = 0`) -> set `CONFIRMED`
-- If payment fails -> set `FAILED` and release slot lock/slot
+- Validate request.
+- Acquire Redis slot lock `SET slot:{doctorId}:{timeSlotId} NX EX 300`.
+- Pre-check slot in database for same `(doctorId, appointmentDate, timeSlot)` with status in `PENDING|CONFIRMED`.
+- Create appointment with `PENDING`, persist deposit fields, and mark timeslot `booked` in a MongoDB transaction.
+- `BHYT`: `depositStatus=NOT_REQUIRED`; appointment is confirmed immediately; `appointment.booking.success` is emitted; `Visit(CREATED)` is created.
+- `DICH_VU`: `depositStatus=PENDING`; create `Payment(purpose=APPOINTMENT_DEPOSIT, appointmentId=...)`; return VNPay `paymentUrl`; appointment remains `PENDING`; Visit is not created yet.
+- DICH_VU deposit success: set `depositStatus=PAID`, `depositPaidAmount`, `depositPaidAt`, `depositPaymentId`; set appointment `CONFIRMED`; emit `appointment.booking.success`; create Visit.
+- Deposit failure/expiry: set `depositStatus=FAILED`, appointment `FAILED`, release slot, and do not create Visit.
 
 Request examples:
-1. Preferred payload (new contract)
+1. DICH_VU payload requiring deposit payment
 ```json
 {
-  "hospitalName": "Bệnh viện Đa khoa",
+  "hospitalName": "UTE Clinic",
   "appointmentDate": "2026-04-15T02:00:00Z",
   "timeSlotId": "67f2b1...",
   "doctor": {
@@ -904,25 +908,27 @@ Request examples:
   "visitType": "OFFLINE",
   "paymentCategory": "DICH_VU",
   "depositAmount": 100000,
-  "paymentMethod": "ONLINE",
-  "amount": 100000,
+  "paymentMethod": "VNPAY",
   "reasonForAppointment": "Tai kham dinh ky"
 }
 ```
 
-2. Backward-compatible legacy payload (deprecated)
+2. BHYT payload without deposit
 ```json
 {
-  "hospitalName": "Bệnh viện Đa khoa",
-  "date": "2026-04-15T02:00:00Z",
+  "hospitalName": "UTE Clinic",
+  "appointmentDate": "2026-04-15T02:00:00Z",
   "timeSlotId": "67f2b1...",
   "doctor": {
     "id": "67f1a0...",
     "name": "Nguyen Van A",
     "email": "doctor@example.com"
   },
-  "serviceType": "KHAM_DICH_VU",
-  "paymentMethod": "ONLINE"
+  "serviceType": "KHAM_BHYT",
+  "visitType": "OFFLINE",
+  "paymentCategory": "BHYT",
+  "paymentMethod": "OFFLINE",
+  "reasonForAppointment": "Kham BHYT"
 }
 ```
 
@@ -932,59 +938,53 @@ Response examples:
 { "code": "ERROR", "message": "Slot already booked", "data": null }
 ```
 
-2. ONLINE payment: create pending booking + payment url
+2. DICH_VU deposit payment required
 ```json
 {
   "code": "PENDING",
-  "message": "Appointment created. Complete payment to confirm booking.",
+  "message": "Appointment created. Complete deposit payment to confirm booking.",
   "data": {
     "appointmentId": "<appointmentId>",
+    "depositStatus": "PENDING",
+    "depositAmount": 100000,
+    "depositPaymentId": "<paymentId>",
     "paymentUrl": "https://...",
-    "originalAmount": 100000,
-    "discountAmount": 10000,
-    "finalAmount": 90000
+    "originalAmount": 150000,
+    "discountAmount": 0,
+    "finalAmount": 150000
   }
 }
 ```
 
-3. CREDIT payment success
+3. BHYT booking confirmed without deposit payment
 ```json
 {
   "code": "SUCCESS",
-  "message": "Deducted ... credit successfully",
+  "message": "Booking confirmed (payment deferred - use billing flow)",
   "data": {
     "appointmentId": "<appointmentId>",
-    "originalAmount": 100000,
-    "discountAmount": 10000,
-    "finalAmount": 90000
+    "depositStatus": "NOT_REQUIRED",
+    "depositAmount": 0,
+    "depositPaidAmount": 0,
+    "depositPaidAt": null,
+    "originalAmount": 150000,
+    "discountAmount": 0,
+    "finalAmount": 150000
   }
 }
 ```
 
-4. Zero-final booking (fully discounted by policy)
-```json
-{
-  "code": "SUCCESS",
-  "message": "Appointment confirmed successfully",
-  "data": {
-    "appointmentId": "<appointmentId>",
-    "originalAmount": 20000,
-    "discountAmount": 20000,
-    "finalAmount": 0
-  }
-}
-```
-
-5. Payment/booking failed
+4. Deposit/booking failed
 ```json
 {
   "code": "ERROR",
   "message": "...",
   "data": {
     "appointmentId": "<appointmentId>",
-    "originalAmount": 100000,
-    "discountAmount": 10000,
-    "finalAmount": 90000
+    "depositStatus": "FAILED",
+    "originalAmount": 150000,
+    "discountAmount": 0,
+    "finalAmount": 150000
   }
 }
 ```
@@ -998,9 +998,10 @@ Notes:
 - Duplicate key errors (`11000`) are mapped to `Slot already booked`.
 - Deprecated field notice: `date` will be removed in a future version. Use `appointmentDate` instead.
 - If both `appointmentDate` and deprecated `date` are provided, `appointmentDate` takes precedence.
-- `paymentMethod=COIN` is deprecated and rejected. Use `useCoin=true` with `ONLINE|VNPAY|CREDIT`.
-- Coin used in booking is discount-only and never treated as standalone payment.
-- Response shape is unchanged for backward compatibility (`code`, `message`, `data` with amount breakdown fields when applicable).
+- `paymentMethod=COIN` is deprecated and rejected.
+- `amount`, `coinsToUse`, and `useCoin` are deprecated for booking. FE should use billing endpoints for credit/coin application.
+- Billing uses booking deposit only when `depositStatus=PAID`; `depositAmount` alone is not payment evidence.
+- `Payment.purpose` distinguishes `BILLING` from `APPOINTMENT_DEPOSIT`.
 
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.
@@ -1608,12 +1609,12 @@ Notes:
 ## Payment (VNPay)
 
 ### GET /payment/create_payment_url
-Description: Create VNPay payment URL.
+Description: Deprecated appointment-payment URL endpoint.
 Auth: Public
 Query:
 - `orderId`: string
 - `amount`: number
-Response: `{ "paymentUrl": "..." }`
+Response: Error. Booking payment is now created by `POST /appointment/book` for DICH_VU deposits, and billing payment is created by `GET /receptionist/payments/:billingId/qr`.
 
 ### GET /payment/vnpay_return
 Description: VNPay return handler.
@@ -1622,39 +1623,30 @@ Query: VNPay return params
 Behavior:
 - Verify VNPay signature and response code.
 - Process result idempotently (duplicate callbacks do not double-update).
-- If success (`vnp_ResponseCode=00` and `vnp_TransactionStatus=00`): finalize payment as `COMPLETED` and confirm appointment.
-- If failed or checksum invalid: finalize payment as `FAILED`.
+- If callback is for `Payment.purpose = APPOINTMENT_DEPOSIT`:
+  - success marks the deposit `PAID`, stores `depositPaidAmount/depositPaidAt/depositPaymentId`, confirms the appointment, and emits `appointment.booking.success`.
+  - failure marks the deposit `FAILED`, marks the appointment `FAILED`, releases the slot, and does not create a Visit.
+- If callback is for `Payment.purpose = BILLING`:
+  - success sets `Payment.status = SUCCESS`, sets `Billing.status = PAID`, commits credit/coin deductions and coin reward, and emits `domain.payment.success`.
+- If checksum invalid: reject the callback.
 - Convert `vnp_PayDate` (VNPay GMT+7 format `yyyyMMddHHmmss`) to UTC before persisting.
 - Emit best-effort real-time event `payment:update` with payload `{ orderId, status }`.
-- Redirect user to frontend result page.
 
-Important notes (billing-based flow):
-- The backend now uses `vnp_TxnRef` as the canonical `billingId` (NOT `orderId`). VNPay callbacks will be resolved by `billingId` and the payment record is created for the billing resource.
-- On a successful VNPay callback the server will: set `Payment.status = SUCCESS` for the associated payment, set `Billing.status = PAID`, commit any wallet deductions (credit/coin) and coin reward, and emit `domain.payment.success` event.
-- FE MUST NOT rely on `orderId` for billing-based payments; the receptionist flow exposes the QR creation endpoint `GET /receptionist/payments/:billingId/qr` which returns `paymentId`, `paymentUrl`, and `amount`.
+Important notes:
+- Billing QR payments still use `vnp_TxnRef = billingId`.
+- Appointment deposit payments use `vnp_TxnRef = paymentId` so the callback can resolve `Payment.purpose = APPOINTMENT_DEPOSIT`.
+- FE MUST NOT rely on client-sent `amount`; payment amount comes from backend-created `Payment.amount`.
+- Receptionist billing flow exposes `GET /receptionist/payments/:billingId/qr`.
+- DICH_VU booking flow exposes deposit `paymentUrl` directly from `POST /appointment/book`.
 
 Response:
-- No JSON body.
-- HTTP redirect to:
-  - `${FRONTEND_URL}/payment-result?orderId=<orderId>&status=COMPLETED|FAILED&code=<vnp_ResponseCode>`
+- JSON metadata `{ code, message, data }`.
 
 ### GET /payment/:orderId
 ### GET /payments/:orderId
-Description: Get payment status by order/appointment id.
+Description: Deprecated appointment-payment status endpoints.
 Auth: Public
-Response:
-```json
-{
-  "orderId": "string",
-  "status": "PENDING | COMPLETED | FAILED",
-  "amount": 100000,
-  "paidAt": "2026-04-08T01:23:45.000Z"
-}
-```
-
-Notes:
-- `paidAt` can be `null` for unpaid/failed records.
-- `orderId` maps to appointment id (`vnp_TxnRef`).
+Response: Error. Use booking response deposit fields for appointment deposit state, and billing/payment endpoints for finalized billing payment state.
 
 ## WebSocket (Socket.IO)
 
@@ -1732,12 +1724,12 @@ Important:
 Purpose: payment url and payment status updates.
 
 Server push events:
-- `PAYMENT_VNPAY_URL_CREATED` payload `{ appointmentId, paymentUrl }` (to user email room)
 - `payment:update` payload `{ orderId, status }` (broadcast to all clients in namespace)
 
 Event source flow:
-- Booking flow emits `payment.vnpay.url.created` => VnPay gateway pushes `PAYMENT_VNPAY_URL_CREATED`
-- VNPay return endpoint emits `payment.update` => VnPay gateway broadcasts `payment:update`
+- DICH_VU booking returns the deposit `paymentUrl` directly in `POST /appointment/book`.
+- Billing QR creation returns the billing `paymentUrl` directly in `GET /receptionist/payments/:billingId/qr`.
+- VNPay return endpoint emits `payment.update` => VnPay gateway broadcasts `payment:update`.
 
 ### Namespace `/patient-profile`
 Purpose: push assembled patient profile data.

@@ -3,6 +3,36 @@
 Date: 2026-04-08
 Scope: Backend booking flow hardening in Appointment module + VNPay callback/payment status integration
 
+## Update 2026-05-25 (DICH_VU Deposit Payment Evidence)
+
+Scope: Add explicit appointment deposit payment evidence for visit/billing workflow.
+
+### What changed
+
+- `DICH_VU` booking now requires `depositAmount > 0`.
+- `BHYT` booking normalizes `depositAmount = 0` and confirms without deposit payment.
+- `DICH_VU` booking creates a VNPay appointment deposit payment and returns `paymentUrl`.
+- Appointment remains `PENDING` until deposit payment succeeds.
+- Visit is created only after appointment becomes `CONFIRMED`.
+- Appointment now exposes deposit evidence fields:
+  - `depositStatus`: `NOT_REQUIRED | PENDING | PAID | FAILED | REFUNDED | FORFEITED`
+  - `depositPaidAmount`
+  - `depositPaidAt`
+  - `depositPaymentId`
+- Billing uses deposit only when `depositStatus = PAID`; `depositUsed = depositPaidAmount`.
+- `depositAmount` alone is not proof of collected money.
+- New booking clients should not send `amount`; it is deprecated and ignored for payment/deposit evidence.
+- Payment records now distinguish:
+  - `purpose = BILLING` with `billingId`
+  - `purpose = APPOINTMENT_DEPOSIT` with `appointmentId`
+
+### FE integration notes
+
+- For `DICH_VU`, wait for deposit payment success before expecting `Visit(CREATED)`.
+- For `BHYT`, booking can confirm immediately without deposit payment.
+- Do not infer paid money from `amount`, `paymentAmount`, or `depositAmount`.
+- Appointment cancellation with paid deposit needs an explicit refund/forfeit business rule; do not auto-credit wallet from appointment cancel.
+
 ## Update 2026-04-27 (Visit-Based Workflow Fields)
 
 Scope: Extend booking request contract for receptionist/visit workflow without breaking legacy payment flow.
