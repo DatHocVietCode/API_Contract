@@ -54,7 +54,8 @@ Reschedule is permitted only when **all** of the following are true:
 4. No `Billing` exists for the visit.
 5. No `Payment` linked to a billing exists.
 6. New `appointmentDate` is in the future (UTC).
-7. New `timeSlotId` slot is available for the same doctor.
+7. New `timeSlotId` belongs to the same doctor (validated via `Shift.timeSlots[]`).
+8. New `timeSlotId` slot is available (not already booked by another appointment).
 
 ---
 
@@ -71,6 +72,8 @@ Reschedule is permitted only when **all** of the following are true:
 | `Payment` linked to the billing exists | `PAYMENT_EXISTS` |
 | New schedule is in the past | `INVALID_SCHEDULE` |
 | New slot is taken (Redis lock or DB conflict) | `SLOT_UNAVAILABLE` |
+| New slot does not belong to the appointment's doctor | `SLOT_DOCTOR_MISMATCH` |
+| Appointment has no assigned doctor (`doctorId` is null) | `APPOINTMENT_DOCTOR_NOT_ASSIGNED` |
 
 ---
 
