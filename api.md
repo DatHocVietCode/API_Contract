@@ -1484,8 +1484,53 @@ Description: Get doctor by authenticated account id.
 Auth: Required (JWT)
 
 ### GET /doctors/:id
-Description: Get doctor by id.
+Description: Get full doctor information by doctor id. Includes populated profile and specialty.
 Auth: Public
+
+Params:
+- `id`: string (MongoDB ObjectId of the doctor)
+
+Success Response `200`:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched doctor successfully",
+  "data": {
+    "_id": "664a1b2c3d4e5f6789abcdef",
+    "profileId": {
+      "_id": "664a1b2c3d4e5f6789aaaaaa",
+      "name": "Nguyen Van A",
+      "email": "doctor@example.com",
+      "phone": "0901234567",
+      "address": "123 Le Loi, District 1",
+      "gender": "male",
+      "dob": "1985-03-15T00:00:00.000Z",
+      "avatarUrl": "https://res.cloudinary.com/example/image/upload/profiles/avatar.jpg"
+    },
+    "accountId": "664a1b2c3d4e5f6789bbbbbb",
+    "doctorName": "Dr. Nguyen Van A",
+    "chuyenKhoaId": {
+      "_id": "664a1b2c3d4e5f6789cccccc",
+      "name": "Pediatrics",
+      "description": "Pediatric specialty",
+      "status": true
+    },
+    "degree": ["General Medicine", "Master of Medicine"],
+    "academic": "PhD",
+    "bio": "Doctor with over 10 years of experience...",
+    "achievements": ["Outstanding Doctor Award 2022"],
+    "yearsOfExperience": 10,
+    "createdAt": "2024-05-01T00:00:00.000Z",
+    "updatedAt": "2024-05-10T00:00:00.000Z"
+  }
+}
+```
+
+Error Responses:
+- `404 Not Found`: Doctor id does not exist or is an invalid ObjectId.
+  ```json
+  { "statusCode": 404, "message": "Doctor not found", "error": "Not Found" }
+  ```
 
 ### PATCH /doctors/:id
 Description: Update doctor (multipart supported).
