@@ -1062,9 +1062,20 @@ Visit-based cancellation rules:
 - Appointment status must be `PENDING` or `CONFIRMED`.
 - Linked `Visit` must exist and have status `CREATED`.
 - Cancellation is blocked once the visit is `CHECKED_IN`, `IN_PROGRESS`, `COMPLETED`, or any status other than `CREATED`.
+- Cancellation is blocked within 24 hours of the scheduled appointment time.
 - Cancellation is blocked if a `MedicalEncounter`, `Billing`, or related `Payment` exists.
 - On success, backend sets `Appointment.status = CANCELLED`, `Visit.status = CANCELLED`, and releases the `TimeSlotLog` to `available`.
-- Appointment cancellation does not issue CreditWallet refunds. Any financial adjustment must be handled by a separate billing/payment refund flow.
+- Only the owning patient or staff with `ADMIN` / `RECEPTIONIST` role may cancel.
+
+Deposit refund rules:
+- `BHYT`: no deposit and no refund.
+- `DICH_VU`: refund to `CreditWallet` only when `depositStatus=PAID` and `depositPaidAmount > 0`.
+- Refund amount is `floor(depositPaidAmount * APPOINTMENT_CANCEL_REFUND_RATE)`.
+- `APPOINTMENT_CANCEL_REFUND_RATE` defaults to `1`, is clamped to `0..1`, and may disable refund with `0`.
+- Refund evidence never comes from `amount`, `paymentAmount`, `depositAmount`, `consultationFee`, or `paidAt`.
+- The refund ledger references `appointmentId` and is idempotent. Coin wallet is never credited or restored.
+- Pending, ambiguous, or inconsistent appointment-deposit payment records block cancellation to avoid callback races.
+- Notification, mail, and socket cancellation side effects may run after a successful commit.
 
 Blocked reason codes:
 - `APPOINTMENT_NOT_CANCELABLE`
@@ -1073,6 +1084,10 @@ Blocked reason codes:
 - `MEDICAL_ENCOUNTER_EXISTS`
 - `BILLING_EXISTS`
 - `PAYMENT_EXISTS`
+- `APPOINTMENT_DEPOSIT_PAYMENT_PENDING`
+- `APPOINTMENT_DEPOSIT_PAYMENT_AMBIGUOUS`
+- `APPOINTMENT_DEPOSIT_PAYMENT_INCONSISTENT`
+- `TIME_SLOT_RELEASE_FAILED`
 
 ### PATCH /appointment/:id/confirm
 Description: Confirm appointment.

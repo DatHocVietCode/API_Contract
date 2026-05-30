@@ -31,7 +31,8 @@ Scope: Add explicit appointment deposit payment evidence for visit/billing workf
 - For `DICH_VU`, wait for deposit payment success before expecting `Visit(CREATED)`.
 - For `BHYT`, booking can confirm immediately without deposit payment.
 - Do not infer paid money from `amount`, `paymentAmount`, or `depositAmount`.
-- Appointment cancellation with paid deposit needs an explicit refund/forfeit business rule; do not auto-credit wallet from appointment cancel.
+- Appointment cancellation refunds a verified paid DICH_VU deposit to `CreditWallet`, subject to `APPOINTMENT_CANCEL_REFUND_RATE` (default `1`).
+- Cancellation refund evidence is only `depositStatus = PAID` with `depositPaidAmount > 0`; intended or legacy amount fields are never refund proof.
 
 ## Update 2026-04-27 (Visit-Based Workflow Fields)
 

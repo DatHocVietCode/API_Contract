@@ -628,7 +628,7 @@ These are implementation-level observations from current code.
 1. Authorization gaps on sensitive actions
 - `PATCH /appointment/complete` has no JWT guard.
 - `PATCH /appointment/:id/confirm` has no JWT guard.
-- `PATCH /appointment/cancel` is guarded, but service does not validate ownership/role against `req.user`.
+- `PATCH /appointment/cancel` is guarded and allows the owning patient or `ADMIN` / `RECEPTIONIST` staff.
 
 2. Reschedule status can create dead-end state
 - Reschedule sets appointment to `RESCHEDULED`.
