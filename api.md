@@ -1003,6 +1003,114 @@ Notes:
 - Billing uses booking deposit only when `depositStatus=PAID`; `depositAmount` alone is not payment evidence.
 - `Payment.purpose` distinguishes `BILLING` from `APPOINTMENT_DEPOSIT`.
 
+### GET /appointment/:appointmentId/deposit-status
+Description: Poll the read-only appointment deposit state after a DICH_VU booking opens the VNPay popup.
+Auth: Required (JWT)
+Authorization:
+- The owning patient can query their appointment.
+- `ADMIN` and `RECEPTIONIST` staff can query an appointment.
+- Other users receive `403`.
+Params:
+- `appointmentId`: appointment id
+
+Response fields:
+- `appointmentId`: string
+- `appointmentStatus`: `PENDING | CONFIRMED | FAILED | CANCELLED | COMPLETED | RESCHEDULED`
+- `paymentCategory`: `BHYT | DICH_VU`
+- `depositStatus`: `NOT_REQUIRED | PENDING | PAID | FAILED | REFUNDED | FORFEITED`
+- `depositAmount`: required/intended deposit amount. This is not paid-money evidence.
+- `depositPaidAmount`: verified paid deposit amount.
+- `depositPaidAt`: epoch milliseconds UTC or `null`.
+- `depositPaymentId`: linked appointment deposit payment id or `null`.
+- `paymentStatus`: linked payment status `PENDING | SUCCESS | FAILED` or `null`.
+- `paymentUrl`: always `null`. This endpoint never creates or refreshes payments.
+- `isConfirmed`: `true` when appointment is `CONFIRMED` or `COMPLETED`.
+- `isTerminal`: `true` when deposit status is terminal or appointment is `FAILED` / `CANCELLED`.
+
+DICH_VU pending response:
+```json
+{
+  "appointmentId": "<appointmentId>",
+  "appointmentStatus": "PENDING",
+  "paymentCategory": "DICH_VU",
+  "depositStatus": "PENDING",
+  "depositAmount": 100000,
+  "depositPaidAmount": 0,
+  "depositPaidAt": null,
+  "depositPaymentId": "<paymentId>",
+  "paymentStatus": "PENDING",
+  "paymentUrl": null,
+  "isConfirmed": false,
+  "isTerminal": false
+}
+```
+
+DICH_VU paid/confirmed response:
+```json
+{
+  "appointmentId": "<appointmentId>",
+  "appointmentStatus": "CONFIRMED",
+  "paymentCategory": "DICH_VU",
+  "depositStatus": "PAID",
+  "depositAmount": 100000,
+  "depositPaidAmount": 100000,
+  "depositPaidAt": 1780200000000,
+  "depositPaymentId": "<paymentId>",
+  "paymentStatus": "SUCCESS",
+  "paymentUrl": null,
+  "isConfirmed": true,
+  "isTerminal": true
+}
+```
+
+DICH_VU failed response:
+```json
+{
+  "appointmentId": "<appointmentId>",
+  "appointmentStatus": "FAILED",
+  "paymentCategory": "DICH_VU",
+  "depositStatus": "FAILED",
+  "depositAmount": 100000,
+  "depositPaidAmount": 0,
+  "depositPaidAt": null,
+  "depositPaymentId": "<paymentId>",
+  "paymentStatus": "FAILED",
+  "paymentUrl": null,
+  "isConfirmed": false,
+  "isTerminal": true
+}
+```
+
+BHYT not-required response:
+```json
+{
+  "appointmentId": "<appointmentId>",
+  "appointmentStatus": "CONFIRMED",
+  "paymentCategory": "BHYT",
+  "depositStatus": "NOT_REQUIRED",
+  "depositAmount": 0,
+  "depositPaidAmount": 0,
+  "depositPaidAt": null,
+  "depositPaymentId": null,
+  "paymentStatus": null,
+  "paymentUrl": null,
+  "isConfirmed": true,
+  "isTerminal": true
+}
+```
+
+Errors:
+- `401`: missing, invalid, or expired JWT.
+- `403`: authenticated user does not own the appointment and is not allowed staff.
+- `404`: appointment not found.
+
+FE guidance:
+1. After DICH_VU `POST /appointment/book` returns `paymentUrl`, open the VNPay popup.
+2. Poll `GET /appointment/:appointmentId/deposit-status` from the parent page until `isTerminal=true` or `depositStatus=PAID|FAILED`.
+3. Show confirmed only when `depositStatus=PAID` and `appointmentStatus=CONFIRMED`.
+4. If the popup closes early, keep polling or offer a refresh-status action.
+5. Treat `depositAmount` as intended amount only. Use `depositPaidAmount` with `depositStatus=PAID` as verified payment evidence.
+
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.
 Auth: Required (JWT)
