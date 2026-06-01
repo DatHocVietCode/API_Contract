@@ -1003,6 +1003,82 @@ Notes:
 - Billing uses booking deposit only when `depositStatus=PAID`; `depositAmount` alone is not payment evidence.
 - `Payment.purpose` distinguishes `BILLING` from `APPOINTMENT_DEPOSIT`.
 
+#### Broad booking (no doctor/slot) — `POST /appointment/book` with `broadBooking: true`
+Description: Patient books without choosing a doctor or time slot. The backend creates a `PENDING` appointment with no doctor/slot and an `AppointmentAssignmentTask` for receptionists to pick up. This branches **before** the normal doctor/slot validation.
+
+Extra body field:
+- `broadBooking`: boolean — set `true` to use this path.
+
+Field rules for broad booking:
+- `doctor` and `timeSlotId` are omitted (no doctor/slot yet).
+- `appointmentDate` is not required (the real schedule is set when a receptionist assigns a slot).
+- At least one routing hint is required: `specialty` OR `reasonForAppointment`.
+- `paymentCategory`: `BHYT | DICH_VU` (defaults to `DICH_VU`).
+- `depositAmount`: required and `> 0` for `DICH_VU` (taken upfront, same as normal `DICH_VU`); normalized to `0` for `BHYT`.
+
+Behavior:
+- Creates appointment: `appointmentStatus = PENDING`, `assignmentStatus = AWAITING_ASSIGNMENT`, `doctorId = null`, `timeSlot = null`.
+- Creates `AppointmentAssignmentTask` (`status = PENDING`) carrying `specialty`, `reasonForAppointment`, `patientEmail`, `priority = NORMAL`, and `deadlineAt` (`now + ASSIGNMENT_DEADLINE_MINUTES`, default 30).
+- `BHYT`: `depositStatus = NOT_REQUIRED`, no payment URL.
+- `DICH_VU`: `depositStatus = PENDING`, returns VNPay `paymentUrl` (use the existing deposit polling flow). If deposit creation fails, the appointment is set `FAILED` and the task `CANCELLED`.
+- Emits `appointment.assignment.created`. Does **not** emit `appointment.booking.success` and does **not** create a `Visit` yet — those happen only when a doctor/slot is assigned.
+- Broad appointments are excluded from the booking-payment TTL sweep; their lifecycle is governed by the assignment task deadline (see SLA below).
+
+Request example (DICH_VU broad booking):
+```json
+{
+  "broadBooking": true,
+  "specialty": "Tim mach",
+  "reasonForAppointment": "Dau nguc",
+  "paymentCategory": "DICH_VU",
+  "depositAmount": 100000,
+  "paymentMethod": "VNPAY",
+  "serviceType": "KHAM_DICH_VU"
+}
+```
+
+Response (DICH_VU broad booking — deposit required):
+```json
+{
+  "code": "PENDING",
+  "message": "Broad appointment created. Complete deposit payment; a receptionist will assign a doctor.",
+  "data": {
+    "appointmentId": "<appointmentId>",
+    "assignmentTaskId": "<taskId>",
+    "assignmentStatus": "AWAITING_ASSIGNMENT",
+    "depositStatus": "PENDING",
+    "depositAmount": 100000,
+    "depositPaymentId": "<paymentId>",
+    "paymentUrl": "https://...",
+    "originalAmount": 150000,
+    "discountAmount": 0,
+    "finalAmount": 150000
+  }
+}
+```
+
+Response (BHYT broad booking — no deposit):
+```json
+{
+  "code": "PENDING",
+  "message": "Broad appointment created. A receptionist will assign a doctor.",
+  "data": {
+    "appointmentId": "<appointmentId>",
+    "assignmentTaskId": "<taskId>",
+    "assignmentStatus": "AWAITING_ASSIGNMENT",
+    "depositStatus": "NOT_REQUIRED",
+    "depositAmount": 0,
+    "originalAmount": 150000,
+    "discountAmount": 0,
+    "finalAmount": 150000
+  }
+}
+```
+
+FE handling:
+- Show `AWAITING_ASSIGNMENT` (e.g. "Đang chờ lễ tân phân công bác sĩ"). Do not show a confirmed appointment until assignment completes.
+- For `DICH_VU`, open the VNPay popup with `paymentUrl` and reuse the existing `GET /appointment/:appointmentId/deposit-status` polling.
+
 ### GET /appointment/:appointmentId/deposit-status
 Description: Poll the read-only appointment deposit state after a DICH_VU booking opens the VNPay popup.
 Auth: Required (JWT)
@@ -1200,6 +1276,125 @@ Blocked reason codes:
 ### PATCH /appointment/:id/confirm
 Description: Confirm appointment.
 Auth: Public
+
+## Appointment Assignment Tasks (Broad Appointment Routing)
+
+Broad bookings (see `POST /appointment/book` with `broadBooking: true`) create an `AppointmentAssignmentTask`. Receptionists work this queue: list → accept (claim) → assign doctor/slot (or release).
+
+Statuses:
+- Appointment `assignmentStatus`: `NONE` (normal booking) | `AWAITING_ASSIGNMENT` (broad, waiting) | `ASSIGNED` (doctor/slot set).
+- Assignment task `status`: `PENDING` | `ASSIGNED` (claimed by a receptionist) | `COMPLETED` (doctor/slot assigned) | `EXPIRED` | `ESCALATED` | `CANCELLED`.
+
+Error envelope: blocked operations return `{ "code": "ERROR", "message": "...", "data": { "blockedReason": "<CODE>" } }` (HTTP 400, or 404 for `TASK_NOT_FOUND`).
+
+Blocked reason codes used here: `TASK_NOT_FOUND`, `TASK_NOT_PENDING`, `TASK_ALREADY_ACCEPTED`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`, `APPOINTMENT_NOT_ASSIGNABLE`, `SLOT_UNAVAILABLE`, `SLOT_DOCTOR_MISMATCH`, `INVALID_SCHEDULE`, `DEPOSIT_NOT_PAID`.
+
+Task shape (returned by list/detail):
+```json
+{
+  "_id": "<taskId>",
+  "appointmentId": "<appointmentId>",
+  "status": "PENDING",
+  "specialty": "Tim mach",
+  "reasonForAppointment": "Dau nguc",
+  "patientEmail": "patient@example.com",
+  "priority": "NORMAL",
+  "deadlineAt": 1781000000000,
+  "acceptedByReceptionistId": null,
+  "acceptedAt": null,
+  "completedAt": null,
+  "reminderCount": 0,
+  "history": [ { "at": 1780000000000, "from": "", "to": "PENDING", "by": "system", "note": "broad booking created" } ],
+  "createdAt": "2026-06-01T10:00:00.000Z",
+  "updatedAt": "2026-06-01T10:00:00.000Z"
+}
+```
+
+### GET /appointment/assignment-tasks
+Description: List assignment tasks (queue view).
+Auth: Required (JWT), role `RECEPTIONIST` or `ADMIN`.
+Query:
+- `status`: string (default `PENDING`)
+- `specialty`: string (optional filter)
+- `page`: number (default 1)
+- `limit`: number (default 20, max 100)
+Response:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched assignment tasks successfully",
+  "data": {
+    "items": [ { "_id": "<taskId>", "appointmentId": "<id>", "status": "PENDING", "specialty": "Tim mach", "deadlineAt": 1781000000000 } ],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "totalPages": 1 }
+  }
+}
+```
+
+### GET /appointment/assignment-tasks/:id
+Description: Get a single assignment task (includes `history`).
+Auth: Required (JWT), role `RECEPTIONIST` or `ADMIN`.
+Errors: `TASK_NOT_FOUND` (404).
+
+### POST /appointment/assignment-tasks/:id/accept
+Description: Atomically claim a `PENDING` task for the calling receptionist (single winner under concurrency).
+Auth: Required (JWT), role `RECEPTIONIST`.
+Body: none.
+Behavior: sets `status = ASSIGNED`, `acceptedByReceptionistId = <caller accountId>`, `acceptedAt = now`.
+Response:
+```json
+{ "code": "SUCCESS", "message": "Assignment task accepted", "data": { "taskId": "<id>", "status": "ASSIGNED", "acceptedByReceptionistId": "<accountId>", "acceptedAt": 1780000000000 } }
+```
+Errors: `TASK_NOT_FOUND`, `TASK_ALREADY_ACCEPTED` (lost the race / already claimed), `TASK_NOT_PENDING`.
+
+### POST /appointment/assignment-tasks/:id/release
+Description: Return an accepted task to the pool. Only the receptionist who accepted it may release.
+Auth: Required (JWT), role `RECEPTIONIST`.
+Body:
+- `reason`: string (optional)
+Behavior: sets `status = PENDING`, clears `acceptedByReceptionistId`/`acceptedAt`, appends history.
+Response:
+```json
+{ "code": "SUCCESS", "message": "Assignment task released", "data": { "taskId": "<id>", "status": "PENDING" } }
+```
+Errors: `TASK_NOT_FOUND`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`.
+
+### POST /appointment/assignment-tasks/:id/assign
+Description: Assign a doctor + slot to the broad appointment, completing the task. This is **not** reschedule; it converts an unassigned appointment into a normal doctor-assigned one.
+Auth: Required (JWT), role `RECEPTIONIST`. Only the receptionist who accepted the task may assign.
+Body:
+- `doctorId`: string (Mongo id)
+- `timeSlotId`: string (Mongo id)
+- `appointmentDate`: string (ISO 8601 with timezone)
+Behavior:
+- Validates: task is `ASSIGNED` and owned by caller; appointment exists, has no doctor/slot, and is `PENDING`.
+- For `DICH_VU`, the deposit must already be `PAID` (upfront), else `DEPOSIT_NOT_PAID`. `BHYT` needs no deposit.
+- Slot must exist, be in the future, and belong to the doctor (via shift). Uses the Redis slot lock + conflict check.
+- On commit: sets appointment `doctorId`/`timeSlot`/`scheduledAt`/`startTime`/`endTime` and `assignmentStatus = ASSIGNED`, marks the slot `booked`, sets task `status = COMPLETED` + `completedAt`.
+- Emits `appointment.booking.success` (the existing listener then creates `Visit(CREATED)`) and `appointment.assignment.completed`.
+Response:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Doctor and slot assigned",
+  "data": { "appointmentId": "<id>", "doctorId": "<id>", "timeSlotId": "<id>", "scheduledAt": 1781000000000, "status": "PENDING" }
+}
+```
+Errors: `TASK_NOT_FOUND`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`, `APPOINTMENT_NOT_ASSIGNABLE`, `SLOT_UNAVAILABLE`, `SLOT_DOCTOR_MISMATCH`, `INVALID_SCHEDULE`, `DEPOSIT_NOT_PAID`.
+
+### Assignment events & notifications
+EventEmitter2 events (server-internal): `appointment.assignment.created`, `appointment.assignment.completed`, `appointment.assignment.reminder`, `appointment.assignment.expired`.
+
+Notifications (reuse the existing notification pipeline → DB + socket via the Redis bridge):
+- `ASSIGNMENT_TASK_CREATED` — one per `RECEPTIONIST` account when a broad appointment is created. `details`: `{ taskId, appointmentId, specialty, reasonForAppointment, deadlineAt, priority }`. Idempotency key `ASSIGNMENT_TASK_CREATED:<taskId>:<recipientEmail>`.
+- `APPOINTMENT_DOCTOR_ASSIGNED` — to the patient when a doctor/slot is assigned. `details`: `{ appointmentId, doctorId, timeSlotId, scheduledAt }`. Idempotency key `APPOINTMENT_DOCTOR_ASSIGNED:<appointmentId>:<recipientEmail>`.
+
+These are delivered through the existing `/notification` socket namespace and the notification list APIs; an MVP FE may also rely on polling `GET /appointment/assignment-tasks?status=PENDING`.
+
+### Assignment SLA (server cron)
+A background sweep (every ~60s, single-instance via a Redis lock) manages stale tasks. Config (env, all optional with defaults): `ASSIGNMENT_DEADLINE_MINUTES=30`, `ASSIGNMENT_REMINDER_WINDOW_MINUTES=10`, `ASSIGNMENT_REMINDER_INTERVAL_MINUTES=5`, `ASSIGNMENT_GRACE_MINUTES=5`, `ASSIGNMENT_ACCEPT_TTL_MINUTES=10`.
+- Reminder: `PENDING` tasks near the deadline emit `appointment.assignment.reminder` (rate-limited via `lastNotifiedAt`).
+- Expiry: `PENDING` tasks past `deadline + grace` become `EXPIRED` (emit `appointment.assignment.expired`). No auto-refund, no auto-cancel of the appointment — left for manual handling.
+- Stale-accept reclaim: `ASSIGNED` tasks idle past the accept TTL return to `PENDING`.
 
 ## Chat
 
