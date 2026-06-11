@@ -15,7 +15,13 @@ export type NotificationMap = {
   COIN_EXPIRY_REMINDER: CoinExpiryDto;
   APPOINTMENT_SUCCESS: AppointmentSuccessDto;
   APPOINTMENT_CANCELLED: AppointmentCancelledDto;
+  APPOINTMENT_RESCHEDULED: AppointmentRescheduledDto;
   PAYMENT_SUCCESS: PaymentSuccessDto;
+  // Broad-booking / assignment (doctor-less appointment routing):
+  ASSIGNMENT_TASK_CREATED: AssignmentTaskCreatedDto; // -> receptionists
+  ASSIGNMENT_TASK_REMINDER: AssignmentTaskReminderDto; // -> receptionists (SLA, near deadline)
+  ASSIGNMENT_TASK_EXPIRED: AssignmentTaskExpiredDto; // -> receptionists (SLA, past deadline)
+  APPOINTMENT_DOCTOR_ASSIGNED: AppointmentDoctorAssignedDto; // -> patient
 };
 ```
 
@@ -75,7 +81,12 @@ const handlers = {
   COIN_EXPIRY_REMINDER: handleCoinExpiry,
   APPOINTMENT_SUCCESS: handleAppointmentSuccess,
   APPOINTMENT_CANCELLED: handleAppointmentCancelled,
+  APPOINTMENT_RESCHEDULED: handleAppointmentRescheduled,
   PAYMENT_SUCCESS: handlePaymentSuccess,
+  ASSIGNMENT_TASK_CREATED: handleAssignmentTaskCreated,
+  ASSIGNMENT_TASK_REMINDER: handleAssignmentTaskReminder,
+  ASSIGNMENT_TASK_EXPIRED: handleAssignmentTaskExpired,
+  APPOINTMENT_DOCTOR_ASSIGNED: handleAppointmentDoctorAssigned,
 } as const;
 
 socket.on('NOTIFICATION_RECEIVED', (payload: NotificationPayload) => {
@@ -103,6 +114,41 @@ type PaymentSuccessDto = {
   orderId: string;
   status: 'COMPLETED';
 };
+
+// Broad-booking / assignment notification DTOs (delivered as the `data` field).
+// `online` reflects whether Redis role-aware presence saw this receptionist online at emit
+// time; it is informational (e.g. badge styling) and never required for correctness.
+type AssignmentTaskCreatedDto = {
+  taskId: string;
+  appointmentId: string;
+  specialty?: string;
+  reasonForAppointment?: string;
+  deadlineAt: number; // epoch ms
+  priority?: string; // e.g. 'NORMAL'
+  online?: boolean;
+};
+
+type AssignmentTaskReminderDto = {
+  taskId: string;
+  appointmentId?: string;
+  deadlineAt: number; // epoch ms
+  reminderCount?: number;
+  online?: boolean;
+};
+
+type AssignmentTaskExpiredDto = {
+  taskId: string;
+  appointmentId?: string;
+  deadlineAt: number; // epoch ms
+  online?: boolean;
+};
+
+type AppointmentDoctorAssignedDto = {
+  appointmentId: string;
+  doctorId: string;
+  timeSlotId: string;
+  scheduledAt: number; // epoch ms
+};
 ```
 
-`CoinExpiryDto` and `AppointmentSuccessDto` reuse existing BE DTO structures.
+`CoinExpiryDto`, `AppointmentSuccessDto`, and `AppointmentRescheduledDto` reuse existing BE DTO structures.

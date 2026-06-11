@@ -1287,7 +1287,9 @@ Statuses:
 
 Error envelope: blocked operations return `{ "code": "ERROR", "message": "...", "data": { "blockedReason": "<CODE>" } }` (HTTP 400, or 404 for `TASK_NOT_FOUND`).
 
-Blocked reason codes used here: `TASK_NOT_FOUND`, `TASK_NOT_PENDING`, `TASK_ALREADY_ACCEPTED`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`, `APPOINTMENT_NOT_ASSIGNABLE`, `SLOT_UNAVAILABLE`, `SLOT_DOCTOR_MISMATCH`, `INVALID_SCHEDULE`, `DEPOSIT_NOT_PAID`.
+Blocked reason codes used here: `TASK_NOT_FOUND`, `TASK_NOT_PENDING`, `TASK_ALREADY_ACCEPTED`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`, `APPOINTMENT_NOT_ASSIGNABLE`, `SLOT_UNAVAILABLE`, `SLOT_DOCTOR_MISMATCH`, `INVALID_SCHEDULE`, `DEPOSIT_NOT_PAID`, `TASK_LOCK_HELD`.
+
+> **`TASK_LOCK_HELD`** (HTTP 400) — returned by `accept` / `assign` when another receptionist is currently processing the same task (a short-lived Redis lock is held). It is a transient conflict: the FE should show e.g. *"This task is being handled by another receptionist"* and let the user retry / refresh the queue. Distinct from `TASK_ALREADY_ACCEPTED` (which means the task is durably owned by someone else).
 
 Task shape (returned by list/detail):
 ```json
@@ -1344,7 +1346,7 @@ Response:
 ```json
 { "code": "SUCCESS", "message": "Assignment task accepted", "data": { "taskId": "<id>", "status": "ASSIGNED", "acceptedByReceptionistId": "<accountId>", "acceptedAt": 1780000000000 } }
 ```
-Errors: `TASK_NOT_FOUND`, `TASK_ALREADY_ACCEPTED` (lost the race / already claimed), `TASK_NOT_PENDING`.
+Errors: `TASK_NOT_FOUND`, `TASK_ALREADY_ACCEPTED` (lost the race / already claimed), `TASK_NOT_PENDING`, `TASK_LOCK_HELD` (another receptionist is processing this task right now — transient, retryable).
 
 ### POST /appointment/assignment-tasks/:id/release
 Description: Return an accepted task to the pool. Only the receptionist who accepted it may release.
@@ -1379,21 +1381,23 @@ Response:
   "data": { "appointmentId": "<id>", "doctorId": "<id>", "timeSlotId": "<id>", "scheduledAt": 1781000000000, "status": "PENDING" }
 }
 ```
-Errors: `TASK_NOT_FOUND`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`, `APPOINTMENT_NOT_ASSIGNABLE`, `SLOT_UNAVAILABLE`, `SLOT_DOCTOR_MISMATCH`, `INVALID_SCHEDULE`, `DEPOSIT_NOT_PAID`.
+Errors: `TASK_NOT_FOUND`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`, `APPOINTMENT_NOT_ASSIGNABLE`, `SLOT_UNAVAILABLE`, `SLOT_DOCTOR_MISMATCH`, `INVALID_SCHEDULE`, `DEPOSIT_NOT_PAID`, `TASK_LOCK_HELD` (another receptionist is processing this task right now — transient, retryable).
 
 ### Assignment events & notifications
 EventEmitter2 events (server-internal): `appointment.assignment.created`, `appointment.assignment.completed`, `appointment.assignment.reminder`, `appointment.assignment.expired`.
 
-Notifications (reuse the existing notification pipeline → DB + socket via the Redis bridge):
-- `ASSIGNMENT_TASK_CREATED` — one per `RECEPTIONIST` account when a broad appointment is created. `details`: `{ taskId, appointmentId, specialty, reasonForAppointment, deadlineAt, priority }`. Idempotency key `ASSIGNMENT_TASK_CREATED:<taskId>:<recipientEmail>`.
+Notifications (reuse the existing notification pipeline → DB + socket via the Redis bridge). All are delivered through the `/notification` namespace as `NOTIFICATION_RECEIVED` and persisted (queryable via the notification list APIs):
+- `ASSIGNMENT_TASK_CREATED` — to **every** `RECEPTIONIST` account when a broad appointment is created. `details`: `{ taskId, appointmentId, specialty, reasonForAppointment, deadlineAt, priority, online }`. `online: boolean` indicates whether Redis role-aware presence saw **that** receptionist online at emit time (the BE resolves online receptionists from `online_role:RECEPTIONIST` to target realtime; offline receptionists still get the persisted notification). Idempotency key `ASSIGNMENT_TASK_CREATED:<taskId>:<recipientEmail>`.
+- `ASSIGNMENT_TASK_REMINDER` — to receptionists when a `PENDING` task nears its deadline (SLA sweep). `details`: `{ taskId, appointmentId, deadlineAt, reminderCount, online }`. Idempotency key `ASSIGNMENT_TASK_REMINDER:<taskId>:<reminderCount>:<recipientEmail>` (each reminder bump is a distinct notification; a retry of the same reminder dedupes).
+- `ASSIGNMENT_TASK_EXPIRED` — to receptionists when a `PENDING` task passes `deadline + grace` and is marked `EXPIRED` (needs manual attention). `details`: `{ taskId, appointmentId, deadlineAt, online }`. Idempotency key `ASSIGNMENT_TASK_EXPIRED:<taskId>:<recipientEmail>`.
 - `APPOINTMENT_DOCTOR_ASSIGNED` — to the patient when a doctor/slot is assigned. `details`: `{ appointmentId, doctorId, timeSlotId, scheduledAt }`. Idempotency key `APPOINTMENT_DOCTOR_ASSIGNED:<appointmentId>:<recipientEmail>`.
 
-These are delivered through the existing `/notification` socket namespace and the notification list APIs; an MVP FE may also rely on polling `GET /appointment/assignment-tasks?status=PENDING`.
+These are delivered through the existing `/notification` socket namespace and the notification list APIs; an MVP FE may also rely on polling `GET /appointment/assignment-tasks?status=PENDING`. **The DB assignment-task queue remains the source of truth** — realtime notifications are a best-effort nudge, so the receptionist UI must still work from polling if a notification is missed.
 
 ### Assignment SLA (server cron)
 A background sweep (every ~60s, single-instance via a Redis lock) manages stale tasks. Config (env, all optional with defaults): `ASSIGNMENT_DEADLINE_MINUTES=30`, `ASSIGNMENT_REMINDER_WINDOW_MINUTES=10`, `ASSIGNMENT_REMINDER_INTERVAL_MINUTES=5`, `ASSIGNMENT_GRACE_MINUTES=5`, `ASSIGNMENT_ACCEPT_TTL_MINUTES=10`.
-- Reminder: `PENDING` tasks near the deadline emit `appointment.assignment.reminder` (rate-limited via `lastNotifiedAt`).
-- Expiry: `PENDING` tasks past `deadline + grace` become `EXPIRED` (emit `appointment.assignment.expired`). No auto-refund, no auto-cancel of the appointment — left for manual handling.
+- Reminder: `PENDING` tasks near the deadline emit `appointment.assignment.reminder` (rate-limited via `lastNotifiedAt`) → a receptionist `ASSIGNMENT_TASK_REMINDER` notification.
+- Expiry: `PENDING` tasks past `deadline + grace` become `EXPIRED` (emit `appointment.assignment.expired`) → a receptionist `ASSIGNMENT_TASK_EXPIRED` notification. No auto-refund, no auto-cancel of the appointment — left for manual handling (admin escalation is a future improvement).
 - Stale-accept reclaim: `ASSIGNED` tasks idle past the accept TTL return to `PENDING`.
 
 ## Chat
@@ -2028,8 +2032,8 @@ Connection Auth (all namespaces):
 - Missing/invalid/expired token => connection rejected with Unauthorized.
 
 Presence and lifecycle:
-- `heartbeat` is a client event that refreshes Redis TTL for the current user's device set.
-- Presence is tracked with `user:{userId}:devices` as a multi-device SET and `online_users` as the online-user index.
+- `heartbeat` is a client event that refreshes Redis TTL for the current user's device set. Heartbeat now also **recovers** presence: if the device-set key expired while the socket was still alive, the next heartbeat recreates it (and the online/role indexes) — so a brief TTL lapse no longer marks a live user offline.
+- Presence is tracked with `user:{userId}:devices` as a multi-device SET and `online_users` as the online-user index. **Role-aware presence** is also maintained for staff targeting: `online_role:<ROLE>` (SET of userIds, e.g. `online_role:RECEPTIONIST`) + `presence:user:{userId}` (hash `{userId,email,role}`). These are BE-internal (the FE does not read them); the BE uses them to decide which receptionists receive realtime assignment notifications.
 - TTL is a fallback safety net only; the device set remains the source of truth for online state.
 - FE should emit `heartbeat` periodically (recommended every 25-30 seconds) while socket is connected.
 
@@ -2045,14 +2049,14 @@ Old vs New connection flow:
   - On success, backend attaches `socket.data.userId` and accepts connection.
   - Gateway lifecycle updates presence in Redis on connect/disconnect.
   - Client can start namespace business events immediately after connect.
-  - `JOIN_ROOM` is still required only for email-room namespaces (`/appointment`, `/payment/vnpay`, `/patient-profile`, `/notification`).
-  - `JOIN_ROOM` is not the global handshake gate for all namespaces anymore.
+  - The backend now **auto-joins the authenticated user's email room on connect** (derived from the JWT email), so `JOIN_ROOM` is no longer required to receive email-room pushes on `/appointment`, `/payment/vnpay`, `/patient-profile`, `/notification`.
+  - `JOIN_ROOM` remains supported for backward compatibility (it re-joins the same room idempotently and acks `ROOM_JOINED`); FE may keep calling it or drop it.
 
 Room model:
 - User-targeted pushes are mostly sent to room by email.
-- After connected, client should emit `JOIN_ROOM` (no payload required).
-- Server resolves email from JWT payload and joins room `<email>`.
-- Server ack event: `ROOM_JOINED` with payload `{ email }`.
+- The room is auto-joined on connect from the JWT email; explicitly emitting `JOIN_ROOM` (no payload required) is optional and idempotent.
+- Server resolves email from JWT payload and joins room `<email>` (lower-cased).
+- Server ack event (only when the client emits `JOIN_ROOM`): `ROOM_JOINED` with payload `{ email }`.
 
 ### Namespace `/appointment`
 Purpose: booking lifecycle and cancellation notifications.
