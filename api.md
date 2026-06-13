@@ -1242,7 +1242,7 @@ Body:
 - `appointmentId`: string
 - `reason`: string (optional)
 
-Visit-based cancellation rules:
+Visit-based cancellation rules (normal / assigned appointments):
 - Appointment status must be `PENDING` or `CONFIRMED`.
 - Linked `Visit` must exist and have status `CREATED`.
 - Cancellation is blocked once the visit is `CHECKED_IN`, `IN_PROGRESS`, `COMPLETED`, or any status other than `CREATED`.
@@ -1250,6 +1250,14 @@ Visit-based cancellation rules:
 - Cancellation is blocked if a `MedicalEncounter`, `Billing`, or related `Payment` exists.
 - On success, backend sets `Appointment.status = CANCELLED`, `Visit.status = CANCELLED`, and releases the `TimeSlotLog` to `available`.
 - Only the owning patient or staff with `ADMIN` / `RECEPTIONIST` role may cancel.
+
+Broad / unassigned cancellation rules (`assignmentStatus = AWAITING_ASSIGNMENT`):
+- A broad appointment (no `doctorId`/`timeSlot`, no `Visit` yet) is cancellable while awaiting assignment.
+- The 24-hour window and the "Visit must exist" guard do **not** apply to a broad appointment (its `scheduledAt` is a placeholder and a `Visit` is only created once a doctor/slot is assigned).
+- No `TimeSlotLog` is released (none is held until assignment).
+- On success, backend sets `Appointment.status = CANCELLED` and closes the open `AppointmentAssignmentTask` (`PENDING`/`ASSIGNED` → `CANCELLED`, with a history entry) so the receptionist queue is not left with an orphaned task.
+- Deposit refund rules below apply identically — a paid `DICH_VU` deposit is refunded to the `CreditWallet`.
+- The `APPOINTMENT_DEPOSIT_PAYMENT_PENDING` guard still applies: cancellation is blocked while a VNPAY deposit callback is in flight.
 
 Deposit refund rules:
 - `BHYT`: no deposit and no refund.
