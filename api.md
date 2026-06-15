@@ -21,7 +21,17 @@ Typed keys currently supported by `NotificationMap`:
 - `COIN_EXPIRY_REMINDER`
 - `APPOINTMENT_SUCCESS`
 - `APPOINTMENT_CANCELLED`
+- `APPOINTMENT_RESCHEDULED`
 - `PAYMENT_SUCCESS`
+- `ASSIGNMENT_TASK_CREATED`
+- `ASSIGNMENT_TASK_REMINDER`
+- `ASSIGNMENT_TASK_EXPIRED`
+- `APPOINTMENT_DOCTOR_ASSIGNED`
+
+Payload rule:
+- REST and socket payloads are saved notification DTOs.
+- `createdAt`, `appointmentDate`, `scheduledAt`, `bookingDate`, `deadlineAt`, `expiresAt`, and `runAt` are epoch milliseconds UTC.
+- FE formats all dates/times. Backend `title`/`message` fallbacks do not embed raw epoch values.
 
 Legacy socket events remain temporarily for backward compatibility but are deprecated for notification bell sync:
 - `COIN_EXPIRY_REMINDER`
@@ -1395,10 +1405,12 @@ Errors: `TASK_NOT_FOUND`, `TASK_NOT_ASSIGNED`, `TASK_NOT_OWNED`, `APPOINTMENT_NO
 EventEmitter2 events (server-internal): `appointment.assignment.created`, `appointment.assignment.completed`, `appointment.assignment.reminder`, `appointment.assignment.expired`.
 
 Notifications (reuse the existing notification pipeline → DB + socket via the Redis bridge). All are delivered through the `/notification` namespace as `NOTIFICATION_RECEIVED` and persisted (queryable via the notification list APIs):
-- `ASSIGNMENT_TASK_CREATED` — to **every** `RECEPTIONIST` account when a broad appointment is created. `details`: `{ taskId, appointmentId, specialty, reasonForAppointment, deadlineAt, priority, online }`. `online: boolean` indicates whether Redis role-aware presence saw **that** receptionist online at emit time (the BE resolves online receptionists from `online_role:RECEPTIONIST` to target realtime; offline receptionists still get the persisted notification). Idempotency key `ASSIGNMENT_TASK_CREATED:<taskId>:<recipientEmail>`.
-- `ASSIGNMENT_TASK_REMINDER` — to receptionists when a `PENDING` task nears its deadline (SLA sweep). `details`: `{ taskId, appointmentId, deadlineAt, reminderCount, online }`. Idempotency key `ASSIGNMENT_TASK_REMINDER:<taskId>:<reminderCount>:<recipientEmail>` (each reminder bump is a distinct notification; a retry of the same reminder dedupes).
-- `ASSIGNMENT_TASK_EXPIRED` — to receptionists when a `PENDING` task passes `deadline + grace` and is marked `EXPIRED` (needs manual attention). `details`: `{ taskId, appointmentId, deadlineAt, online }`. Idempotency key `ASSIGNMENT_TASK_EXPIRED:<taskId>:<recipientEmail>`.
-- `APPOINTMENT_DOCTOR_ASSIGNED` — to the patient when a doctor/slot is assigned. `details`: `{ appointmentId, doctorId, timeSlotId, scheduledAt }`. Idempotency key `APPOINTMENT_DOCTOR_ASSIGNED:<appointmentId>:<recipientEmail>`.
+- `ASSIGNMENT_TASK_CREATED` — to **every** `RECEPTIONIST` account when a broad appointment is created. `recipientRole: "RECEPTIONIST"`, `data`: `{ taskId, appointmentId, specialty, reasonForAppointment, deadlineAt, priority, online }`, keys: `notification.receptionist.assignmentTaskCreated.*`. `online: boolean` indicates whether Redis role-aware presence saw **that** receptionist online at emit time (the BE resolves online receptionists from `online_role:RECEPTIONIST` to target realtime; offline receptionists still get the persisted notification). Idempotency key `ASSIGNMENT_TASK_CREATED:<taskId>:<recipientEmail>`.
+- `ASSIGNMENT_TASK_REMINDER` — to receptionists when a `PENDING` task nears its deadline (SLA sweep). `recipientRole: "RECEPTIONIST"`, `data`: `{ taskId, appointmentId, deadlineAt, reminderCount, online }`, keys: `notification.receptionist.assignmentTaskReminder.*`. Idempotency key `ASSIGNMENT_TASK_REMINDER:<taskId>:<reminderCount>:<recipientEmail>` (each reminder bump is a distinct notification; a retry of the same reminder dedupes).
+- `ASSIGNMENT_TASK_EXPIRED` — to receptionists when a `PENDING` task passes `deadline + grace` and is marked `EXPIRED` (needs manual attention). `recipientRole: "RECEPTIONIST"`, `data`: `{ taskId, appointmentId, deadlineAt, online }`, keys: `notification.receptionist.assignmentTaskExpired.*`. Idempotency key `ASSIGNMENT_TASK_EXPIRED:<taskId>:<recipientEmail>`.
+- `APPOINTMENT_DOCTOR_ASSIGNED` — to the patient when a doctor/slot is assigned. `recipientRole: "PATIENT"`, `data`: `{ appointmentId, doctorId, timeSlotId, appointmentDate, scheduledAt, patientEmail }`, keys: `notification.patient.doctorAssigned.*`. Idempotency key `APPOINTMENT_DOCTOR_ASSIGNED:<appointmentId>:<recipientEmail>`.
+
+Notification DTOs include `recipientEmail`, `recipientRole`, `titleKey`, `messageKey`, safe fallback `title`/`message`, structured `data`, `isRead`, and `createdAt` epoch milliseconds UTC. FE must format `deadlineAt`, `appointmentDate`, and `scheduledAt`.
 
 These are delivered through the existing `/notification` socket namespace and the notification list APIs; an MVP FE may also rely on polling `GET /appointment/assignment-tasks?status=PENDING`. **The DB assignment-task queue remains the source of truth** — realtime notifications are a best-effort nudge, so the receptionist UI must still work from polling if a notification is missed.
 
@@ -1722,6 +1734,53 @@ Auth: Required (JWT)
 Query:
 - `page`: number (default 1)
 - `limit`: number (default 10)
+
+Current `NotificationDto` shape for new rows:
+```ts
+type NotificationDto = {
+  _id: string;
+  type: NotificationType;
+  recipientEmail: string;
+  recipientRole: 'PATIENT' | 'DOCTOR' | 'RECEPTIONIST' | 'ADMIN';
+  title?: string;
+  message?: string;
+  titleKey?: string;
+  messageKey?: string;
+  data: NotificationStructuredData;
+  isRead: boolean;
+  createdAt: number; // epoch milliseconds UTC
+  idempotencyKey?: string;
+};
+```
+
+Example current response item:
+```json
+{
+  "_id": "...",
+  "type": "APPOINTMENT_SUCCESS",
+  "recipientEmail": "patient@example.com",
+  "recipientRole": "PATIENT",
+  "title": "Đặt lịch khám thành công",
+  "message": "Bạn có thông báo lịch khám mới.",
+  "titleKey": "notification.patient.appointmentSuccess.title",
+  "messageKey": "notification.patient.appointmentSuccess.message",
+  "data": {
+    "appointmentId": "appointment-id",
+    "appointmentDate": 1776010500000,
+    "scheduledAt": 1776010500000,
+    "bookingDate": 1775924100000,
+    "timeRange": "09:00-09:30",
+    "hospitalName": "UTE Doctor",
+    "doctorName": "Nguyễn Văn A",
+    "patientName": "Trần Thị B"
+  },
+  "isRead": false,
+  "createdAt": 1776010500123,
+  "idempotencyKey": "APPOINTMENT_SUCCESS:appointment-id:patient@example.com"
+}
+```
+
+Legacy rows may still expose `details`; new notification rows expose structured `data`.
 Response:
 ```json
 {
@@ -1758,6 +1817,9 @@ Response:
 ```
 
 Notes:
+- Current notification date fields inside `data` (`appointmentDate`, `scheduledAt`, `bookingDate`, `deadlineAt`, `expiresAt`, `runAt`) are epoch milliseconds UTC.
+- FE should render user-facing text from `titleKey`, `messageKey`, `recipientRole`, and `data`.
+- Backend fallback `title`/`message` values are safe generic strings and must not contain raw epoch values, `undefined`, or `null`.
 - `createdAt` and `updatedAt` are epoch milliseconds (UTC).
 - For coin expiry reminders, `details.expiresAt` and `details.runAt` are epoch milliseconds (UTC).
 - FE should render reminder time from `details.expiresAt` instead of parsing `message`.
@@ -2189,9 +2251,9 @@ Notes:
 
 Notification:
 - Notification module persists notification data on `notify.*` domain events.
-- It does not expose a dedicated notification socket namespace.
-- Realtime appointment/shift-related user alerts are delivered through `/appointment` socket events above.
-- Coin expiry reminder push is emitted via global socket event `COIN_EXPIRY_REMINDER` after Redis fanout.
+- The notification bell uses the dedicated `/notification` namespace and one socket event: `NOTIFICATION_RECEIVED`.
+- The socket payload is the saved structured `NotificationDto`, emitted only to `recipientEmail`.
+- Legacy appointment/payment/coin socket events may still exist temporarily, but FE bell logic should use `NOTIFICATION_RECEIVED`.
 
 Wallet:
 - Wallet module currently has HTTP APIs (`/wallet/balance`, `/wallet/details`) and event-driven updates in service/listeners.
@@ -2205,8 +2267,8 @@ Wallet:
 2. Always pass JWT in handshake (`auth.token`)
 3. Immediately emit `JOIN_ROOM` after connected for email-based push namespaces
 4. Subscribe to exact event names from `SocketEventsEnum` (case-sensitive)
-5. Subscribe thêm `COIN_EXPIRY_REMINDER` và render thời gian từ epoch (`data.expiresAt`, `data.runAt`)
-6. Giữ polling `GET /notifications/by-email` như fallback khi mất kết nối socket hoặc app resume nền
+5. Subscribe to `/notification` `NOTIFICATION_RECEIVED` and render all date/time fields from epoch milliseconds in `payload.data`
+6. Keep polling `GET /notifications/by-email` as fallback when socket disconnects or the app resumes
 7. Emit `heartbeat` định kỳ (25-30s) cho các namespace có kết nối dài để giữ presence TTL
 
 ## System

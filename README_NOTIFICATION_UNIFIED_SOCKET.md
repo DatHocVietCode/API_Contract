@@ -6,75 +6,223 @@ Notification realtime is standardized to one socket event so FE only subscribes 
 
 - Namespace: `/notification`
 - Socket event: `NOTIFICATION_RECEIVED`
-- Room strategy: email room from JWT via `JOIN_ROOM`
+- Room strategy: authenticated email room from JWT
+- REST list fallback: `GET /notifications/by-email`
 
-## 2. Notification Type Map
+The backend returns date/time values as epoch milliseconds UTC. FE owns all date, time, locale, and timezone formatting.
+
+## 2. Notification Enums
 
 ```ts
-export type NotificationMap = {
-  COIN_EXPIRY_REMINDER: CoinExpiryDto;
-  APPOINTMENT_SUCCESS: AppointmentSuccessDto;
-  APPOINTMENT_CANCELLED: AppointmentCancelledDto;
-  APPOINTMENT_RESCHEDULED: AppointmentRescheduledDto;
-  PAYMENT_SUCCESS: PaymentSuccessDto;
-  // Broad-booking / assignment (doctor-less appointment routing):
-  ASSIGNMENT_TASK_CREATED: AssignmentTaskCreatedDto; // -> receptionists
-  ASSIGNMENT_TASK_REMINDER: AssignmentTaskReminderDto; // -> receptionists (SLA, near deadline)
-  ASSIGNMENT_TASK_EXPIRED: AssignmentTaskExpiredDto; // -> receptionists (SLA, past deadline)
-  APPOINTMENT_DOCTOR_ASSIGNED: AppointmentDoctorAssignedDto; // -> patient
-};
+export type NotificationType =
+  | 'COIN_EXPIRY_REMINDER'
+  | 'APPOINTMENT_SUCCESS'
+  | 'APPOINTMENT_CANCELLED'
+  | 'APPOINTMENT_RESCHEDULED'
+  | 'PAYMENT_SUCCESS'
+  | 'ASSIGNMENT_TASK_CREATED'
+  | 'ASSIGNMENT_TASK_REMINDER'
+  | 'ASSIGNMENT_TASK_EXPIRED'
+  | 'APPOINTMENT_DOCTOR_ASSIGNED';
+
+export type NotificationRecipientRole =
+  | 'PATIENT'
+  | 'DOCTOR'
+  | 'RECEPTIONIST'
+  | 'ADMIN';
 ```
 
-## 3. Typed Envelope
+## 3. Stored Notification DTO
+
+REST responses and `NOTIFICATION_RECEIVED` both use the saved notification payload:
 
 ```ts
-export type NotificationPayload = {
-  [K in keyof NotificationMap]: {
-    type: K;
-    data: NotificationMap[K];
-    createdAt: number;
-    recipientEmail: string;
-    idempotencyKey: string;
-  }
-}[keyof NotificationMap];
+export type NotificationDto<TType extends NotificationType = NotificationType> = {
+  _id: string;
+  type: TType;
+  recipientEmail: string;
+  recipientRole: NotificationRecipientRole;
+  title?: string; // backward-compatible, safe generic fallback
+  message?: string; // backward-compatible, must not embed raw epoch/undefined/null
+  titleKey?: string; // preferred FE rendering key
+  messageKey?: string; // preferred FE rendering key
+  data: NotificationMap[TType];
+  isRead: boolean;
+  createdAt: number; // epoch milliseconds UTC
+  idempotencyKey?: string;
+};
+
+export type NotificationPayload = NotificationDto;
 ```
 
 Rules:
-- `type` is discriminant key for FE handler registry.
-- `data` keeps domain DTO shape, no flattening.
-- `createdAt` is epoch milliseconds UTC.
-- `recipientEmail` is target room key.
-- `idempotencyKey` is unique business dedup key.
 
-## 4. Transport Pipeline
+- `type` is the discriminant key for FE handler/render registries.
+- `recipientEmail` is the exact saved owner and socket room target.
+- `recipientRole` is the explicit audience for role-specific rendering.
+- `titleKey` and `messageKey` are preferred. FE should render human-facing copy from keys plus `data`.
+- `title` and `message` are backward-compatible fallbacks only. New backend messages are generic and safe; they do not contain raw epoch numbers, `undefined`, or `null`.
+- `data` carries structured domain values. Date fields remain epoch milliseconds UTC.
 
-Notification flow is now:
+## 4. Notification Data Map
 
-1. Domain listeners publish `NotificationPayload` to RabbitMQ queue `notification.jobs`.
+```ts
+export type NotificationMap = {
+  COIN_EXPIRY_REMINDER: CoinExpiryReminderData;
+  APPOINTMENT_SUCCESS: AppointmentNotificationData;
+  APPOINTMENT_CANCELLED: AppointmentCancelledData;
+  APPOINTMENT_RESCHEDULED: AppointmentRescheduledData;
+  PAYMENT_SUCCESS: PaymentSuccessData;
+  ASSIGNMENT_TASK_CREATED: AssignmentTaskCreatedData;
+  ASSIGNMENT_TASK_REMINDER: AssignmentTaskReminderData;
+  ASSIGNMENT_TASK_EXPIRED: AssignmentTaskExpiredData;
+  APPOINTMENT_DOCTOR_ASSIGNED: AppointmentDoctorAssignedData;
+};
+
+export type AppointmentNotificationData = {
+  appointmentId?: string | null;
+  appointmentDate?: number | null; // epoch ms
+  scheduledAt?: number | null; // epoch ms
+  bookingDate?: number | null; // epoch ms
+  timeRange?: string | null;
+  hospitalName?: string | null;
+  doctorName?: string | null;
+  patientName?: string | null;
+  patientEmail?: string | null;
+  paymentMethod?: string | null;
+  serviceType?: string | null;
+  amount?: number | null;
+};
+
+export type AppointmentCancelledData = {
+  appointmentId?: string | null;
+  appointmentDate?: number | null; // epoch ms
+  timeRange?: string | null;
+  timeSlotId?: string | null;
+  hospitalName?: string | null;
+  patientEmail?: string | null;
+  doctorEmail?: string | null;
+  reason?: string | null;
+  refundAmount?: number | null;
+  shouldRefund?: boolean | null;
+};
+
+export type AppointmentRescheduledData = {
+  appointmentId?: string | null;
+  appointmentDate?: number | null; // epoch ms, same as newScheduledAt
+  scheduledAt?: number | null; // epoch ms, same as newScheduledAt
+  oldScheduledAt?: number | null; // epoch ms
+  newScheduledAt?: number | null; // epoch ms
+  timeRange?: string | null;
+  timeSlotId?: string | null;
+  hospitalName?: string | null;
+  doctorName?: string | null;
+  patientEmail?: string | null;
+  doctorEmail?: string | null;
+  reason?: string | null;
+};
+
+export type PaymentSuccessData = {
+  appointmentId?: string | null;
+  orderId?: string | null;
+  status: 'COMPLETED';
+  appointmentDate?: number | null; // epoch ms
+  scheduledAt?: number | null; // epoch ms
+  bookingDate?: number | null; // epoch ms
+  hospitalName?: string | null;
+};
+
+export type AppointmentDoctorAssignedData = {
+  appointmentId?: string | null;
+  doctorId?: string | null;
+  timeSlotId?: string | null;
+  appointmentDate?: number | null; // epoch ms
+  scheduledAt?: number | null; // epoch ms
+  patientEmail?: string | null;
+};
+
+export type AssignmentTaskCreatedData = {
+  taskId?: string | null;
+  appointmentId?: string | null;
+  specialty?: string | null;
+  reasonForAppointment?: string | null;
+  deadlineAt?: number | null; // epoch ms
+  priority?: string | null;
+  online?: boolean | null;
+};
+
+export type AssignmentTaskReminderData = {
+  taskId?: string | null;
+  appointmentId?: string | null;
+  deadlineAt?: number | null; // epoch ms
+  reminderCount?: number | null;
+  online?: boolean | null;
+};
+
+export type AssignmentTaskExpiredData = {
+  taskId?: string | null;
+  appointmentId?: string | null;
+  deadlineAt?: number | null; // epoch ms
+  online?: boolean | null;
+};
+
+export type CoinExpiryReminderData = {
+  jobId?: string;
+  transactionId?: string;
+  amount?: number;
+  expiresAt?: number; // epoch ms
+  runAt?: number; // epoch ms
+  reminderDays?: number;
+};
+```
+
+## 5. Template Keys And Audiences
+
+```ts
+export type NotificationTemplateKey =
+  | 'notification.patient.appointmentSuccess.title'
+  | 'notification.patient.appointmentSuccess.message'
+  | 'notification.doctor.assignedAppointment.title'
+  | 'notification.doctor.assignedAppointment.message'
+  | 'notification.patient.appointmentCancelled.title'
+  | 'notification.patient.appointmentCancelled.message'
+  | 'notification.doctor.appointmentCancelled.title'
+  | 'notification.doctor.appointmentCancelled.message'
+  | 'notification.patient.appointmentRescheduled.title'
+  | 'notification.patient.appointmentRescheduled.message'
+  | 'notification.doctor.appointmentRescheduled.title'
+  | 'notification.doctor.appointmentRescheduled.message'
+  | 'notification.patient.doctorAssigned.title'
+  | 'notification.patient.doctorAssigned.message'
+  | 'notification.patient.paymentSuccess.title'
+  | 'notification.patient.paymentSuccess.message'
+  | 'notification.receptionist.assignmentTaskCreated.title'
+  | 'notification.receptionist.assignmentTaskCreated.message'
+  | 'notification.receptionist.assignmentTaskReminder.title'
+  | 'notification.receptionist.assignmentTaskReminder.message'
+  | 'notification.receptionist.assignmentTaskExpired.title'
+  | 'notification.receptionist.assignmentTaskExpired.message';
+```
+
+Audience rules:
+
+- Patient notifications use `recipientRole: 'PATIENT'` and patient template keys.
+- Doctor notifications use `recipientRole: 'DOCTOR'` and doctor template keys.
+- Receptionist assignment workflow notifications use `recipientRole: 'RECEPTIONIST'` and receptionist template keys.
+- A single appointment event may create multiple notification rows, but each row must have its own recipient, role, keys, and structured data.
+
+## 6. Transport Pipeline
+
+Notification flow:
+
+1. Domain listeners publish typed notification jobs to RabbitMQ queue `notification.jobs`.
 2. Notification consumer processes queue payload.
-3. Handler registry resolves handler by `payload.type`.
-4. Handler persists notification in MongoDB with idempotency key.
-5. Handler publishes the same typed envelope to Redis channel `notification`.
-6. Notification socket bridge subscribes Redis and emits `NOTIFICATION_RECEIVED` to recipient room.
+3. Handler registry resolves the handler by `payload.type`.
+4. Handler persists a notification row in MongoDB with recipient ownership and an idempotency key.
+5. Handler publishes the saved `NotificationDto` to Redis channel `notification`.
+6. Notification socket bridge emits `NOTIFICATION_RECEIVED` to `NotificationDto.recipientEmail` only.
 
-## 5. Backward Compatibility
-
-Legacy domain socket events are temporarily kept for compatibility:
-- `COIN_EXPIRY_REMINDER`
-- `APPOINTMENT_BOOKING_SUCCESS`
-- `APPOINTMENT_BOOKING_PENDING`
-- `APPOINTMENT_BOOKING_FAILED`
-- `APPOINTMENT_CANCELLED`
-- `SHIFT_CANCELLED`
-- `PAYMENT_UPDATE`
-- `PAYMENT_VNPAY_URL_CREATED`
-
-FE should migrate bell/update logic to only:
-- connect `/notification`
-- listen `NOTIFICATION_RECEIVED`
-- dispatch by `payload.type`
-
-## 6. FE Handler Pattern (No switch-case)
+## 7. FE Handler Pattern
 
 ```ts
 const handlers = {
@@ -87,68 +235,31 @@ const handlers = {
   ASSIGNMENT_TASK_REMINDER: handleAssignmentTaskReminder,
   ASSIGNMENT_TASK_EXPIRED: handleAssignmentTaskExpired,
   APPOINTMENT_DOCTOR_ASSIGNED: handleAppointmentDoctorAssigned,
-} as const;
+} satisfies Record<NotificationType, (payload: NotificationPayload) => void>;
 
 socket.on('NOTIFICATION_RECEIVED', (payload: NotificationPayload) => {
-  handlers[payload.type]?.(payload.data, payload);
+  handlers[payload.type]?.(payload);
 });
 ```
 
-## 7. Type Definitions (Current)
+FE should use `payload.titleKey`, `payload.messageKey`, `payload.recipientRole`, and `payload.data` to render localized text. Do not regex-parse `title` or `message` to discover dates.
 
-```ts
-type AppointmentCancelledDto = {
-  appointmentId: string;
-  patientEmail: string;
-  doctorEmail?: string;
-  date: string;
-  timeSlot: string;
-  timeSlotLabel?: string;
-  hospitalName?: string;
-  reason?: string;
-  refundAmount?: number;
-  shouldRefund?: boolean;
-};
+## 8. Backward Compatibility
 
-type PaymentSuccessDto = {
-  orderId: string;
-  status: 'COMPLETED';
-};
+Legacy domain socket events are temporarily kept for compatibility:
 
-// Broad-booking / assignment notification DTOs (delivered as the `data` field).
-// `online` reflects whether Redis role-aware presence saw this receptionist online at emit
-// time; it is informational (e.g. badge styling) and never required for correctness.
-type AssignmentTaskCreatedDto = {
-  taskId: string;
-  appointmentId: string;
-  specialty?: string;
-  reasonForAppointment?: string;
-  deadlineAt: number; // epoch ms
-  priority?: string; // e.g. 'NORMAL'
-  online?: boolean;
-};
+- `COIN_EXPIRY_REMINDER`
+- `APPOINTMENT_BOOKING_SUCCESS`
+- `APPOINTMENT_BOOKING_PENDING`
+- `APPOINTMENT_BOOKING_FAILED`
+- `APPOINTMENT_CANCELLED`
+- `SHIFT_CANCELLED`
+- `PAYMENT_UPDATE`
+- `PAYMENT_VNPAY_URL_CREATED`
 
-type AssignmentTaskReminderDto = {
-  taskId: string;
-  appointmentId?: string;
-  deadlineAt: number; // epoch ms
-  reminderCount?: number;
-  online?: boolean;
-};
+FE bell and notification center should use only:
 
-type AssignmentTaskExpiredDto = {
-  taskId: string;
-  appointmentId?: string;
-  deadlineAt: number; // epoch ms
-  online?: boolean;
-};
-
-type AppointmentDoctorAssignedDto = {
-  appointmentId: string;
-  doctorId: string;
-  timeSlotId: string;
-  scheduledAt: number; // epoch ms
-};
-```
-
-`CoinExpiryDto`, `AppointmentSuccessDto`, and `AppointmentRescheduledDto` reuse existing BE DTO structures.
+- `/notification`
+- `NOTIFICATION_RECEIVED`
+- `GET /notifications/by-email`
+- `PATCH /notifications/:id/read`

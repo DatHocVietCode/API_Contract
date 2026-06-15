@@ -10,8 +10,11 @@ A backend investigation was completed (`ute-doctor-be/docs/notification-backend-
 This document is the **frontend-facing** summary + an integration/verification plan so the FE team
 can confirm where the leak actually comes from and react to the upcoming BE hardening.
 
-**No API contract shape changes are introduced by this work.** Endpoints, payloads, and the
-`NOTIFICATION_RECEIVED` socket envelope are unchanged. Only backend scoping/guards change.
+This ownership note was originally written before the structured notification payload change.
+The current notification payload contract is now documented in
+`README_NOTIFICATION_UNIFIED_SOCKET.md`: new rows include `recipientRole`, `titleKey`,
+`messageKey`, and structured `data` with epoch-millisecond date fields. The scoped endpoints and
+socket namespace below are still the right integration surface.
 
 ---
 
