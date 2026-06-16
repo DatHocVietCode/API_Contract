@@ -899,7 +899,8 @@ Core flow:
 - Create appointment with `PENDING`, persist deposit fields, and mark timeslot `booked` in a MongoDB transaction.
 - `BHYT`: `depositStatus=NOT_REQUIRED`; appointment is confirmed immediately; `appointment.booking.success` is emitted; `Visit(CREATED)` is created.
 - `DICH_VU`: `depositStatus=PENDING`; create `Payment(purpose=APPOINTMENT_DEPOSIT, appointmentId=...)`; return VNPay `paymentUrl`; appointment remains `PENDING`; Visit is not created yet.
-- DICH_VU deposit success: set `depositStatus=PAID`, `depositPaidAmount`, `depositPaidAt`, `depositPaymentId`; set appointment `CONFIRMED`; emit `appointment.booking.success`; create Visit.
+- Normal doctor-selected DICH_VU deposit success: set `depositStatus=PAID`, `depositPaidAmount`, `depositPaidAt`, `depositPaymentId`; set appointment `CONFIRMED`; emit `appointment.booking.success`; create Visit.
+- Broad DICH_VU deposit success: set paid deposit fields but keep appointment `PENDING`; create the assignment task; do not emit `appointment.booking.success` and do not create Visit until doctor/slot assignment.
 - Deposit failure/expiry: set `depositStatus=FAILED`, appointment `FAILED`, release slot, and do not create Visit.
 
 Request examples:
@@ -1014,7 +1015,7 @@ Notes:
 - `Payment.purpose` distinguishes `BILLING` from `APPOINTMENT_DEPOSIT`.
 
 #### Broad booking (no doctor/slot) — `POST /appointment/book` with `broadBooking: true`
-Description: Patient books without choosing a doctor or time slot. The backend creates a `PENDING` appointment with no doctor/slot and an `AppointmentAssignmentTask` for receptionists to pick up. This branches **before** the normal doctor/slot validation.
+Description: Patient books without choosing a doctor or time slot. The backend creates a `PENDING` appointment with no doctor/slot. `BHYT` / no-deposit broad bookings create an `AppointmentAssignmentTask` immediately; `DICH_VU` broad bookings create only the appointment + deposit payment until the deposit succeeds. This branches **before** the normal doctor/slot validation.
 
 Extra body field:
 - `broadBooking`: boolean — set `true` to use this path.
@@ -1028,11 +1029,22 @@ Field rules for broad booking:
 
 Behavior:
 - Creates appointment: `appointmentStatus = PENDING`, `assignmentStatus = AWAITING_ASSIGNMENT`, `doctorId = null`, `timeSlot = null`.
-- Creates `AppointmentAssignmentTask` (`status = PENDING`) carrying `specialty`, `reasonForAppointment`, `patientEmail`, `priority = NORMAL`, and `deadlineAt` (`now + ASSIGNMENT_DEADLINE_MINUTES`, default 30).
+- Current broad `DICH_VU` lifecycle is strictly sequential:
+  - booking creates only `Appointment` + deposit `Payment`;
+  - no actionable `assignmentTaskId` exists before deposit success;
+  - deposit success keeps `appointmentStatus = PENDING`, sets `depositStatus = PAID`, `depositPaidAmount`, `depositPaidAt`, and creates exactly one active `AppointmentAssignmentTask`;
+  - the assignment task `deadlineAt` is based on `depositPaidAt + ASSIGNMENT_DEADLINE_MINUTES`;
+  - broad deposit success does not emit `appointment.booking.success` and does not create a `Visit`.
+- `BHYT` / `NOT_REQUIRED` broad bookings still create an assignment task immediately.
+- `appointment.booking.success` for broad appointments is emitted only after receptionist doctor/slot assignment.
+- Broad unpaid `DICH_VU` payment failure/expiry sets `appointmentStatus = FAILED` and `depositStatus = FAILED`; no refund is issued and no doctor slot is released because no slot exists.
+- Assignment timeout on an actionable broad task sets appointment `CANCELLED`, task `EXPIRED`, `actor = SYSTEM`, `reasonCode = ASSIGNMENT_TIMEOUT`; paid `DICH_VU` deposits are refunded through the credit refund path.
+- No heavy legacy migration is part of this rollout. The scheduler skips legacy broad `DICH_VU` / `PENDING` active tasks; future manual/admin reconciliation can be handled separately.
+- For `BHYT` / `NOT_REQUIRED`, creates `AppointmentAssignmentTask` (`status = PENDING`) carrying `specialty`, `reasonForAppointment`, `patientEmail`, `priority = NORMAL`, and `deadlineAt` (`now + ASSIGNMENT_DEADLINE_MINUTES`, default 30).
 - `BHYT`: `depositStatus = NOT_REQUIRED`, no payment URL.
-- `DICH_VU`: `depositStatus = PENDING`, returns VNPay `paymentUrl` (use the existing deposit polling flow). If deposit creation fails, the appointment is set `FAILED` and the task `CANCELLED`.
-- Emits `appointment.assignment.created`. Does **not** emit `appointment.booking.success` and does **not** create a `Visit` yet — those happen only when a doctor/slot is assigned.
-- Broad appointments are excluded from the booking-payment TTL sweep; their lifecycle is governed by the assignment task deadline (see SLA below).
+- `DICH_VU`: `depositStatus = PENDING`, returns VNPay `paymentUrl` (use the existing deposit polling flow). If deposit creation fails, the appointment is set `FAILED`; no forward assignment task exists to cancel.
+- Emits `appointment.assignment.created` only when an assignment task is actually created (immediately for `BHYT` / `NOT_REQUIRED`, after deposit success for broad `DICH_VU`). Does **not** emit `appointment.booking.success` and does **not** create a `Visit` yet — those happen only when a doctor/slot is assigned.
+- Broad paid/assignable appointments are governed by the assignment task deadline (see SLA below). Broad unpaid `DICH_VU` records are governed by application-level payment failure/expiry, not Mongo TTL deletion alone.
 
 Request example (DICH_VU broad booking):
 ```json
@@ -1054,7 +1066,7 @@ Response (DICH_VU broad booking — deposit required):
   "message": "Broad appointment created. Complete deposit payment; a receptionist will assign a doctor.",
   "data": {
     "appointmentId": "<appointmentId>",
-    "assignmentTaskId": "<taskId>",
+    "assignmentTaskId": null,
     "assignmentStatus": "AWAITING_ASSIGNMENT",
     "depositStatus": "PENDING",
     "depositAmount": 100000,
@@ -1102,6 +1114,7 @@ Params:
 Response fields:
 - `appointmentId`: string
 - `appointmentStatus`: `PENDING | CONFIRMED | FAILED | CANCELLED | COMPLETED | RESCHEDULED`
+- `assignmentStatus`: `NONE | AWAITING_ASSIGNMENT | ASSIGNED` when available.
 - `paymentCategory`: `BHYT | DICH_VU`
 - `depositStatus`: `NOT_REQUIRED | PENDING | PAID | FAILED | REFUNDED | FORFEITED`
 - `depositAmount`: required/intended deposit amount. This is not paid-money evidence.
@@ -1149,6 +1162,25 @@ DICH_VU paid/confirmed response:
 }
 ```
 
+Broad DICH_VU paid/awaiting-assignment response:
+```json
+{
+  "appointmentId": "<appointmentId>",
+  "appointmentStatus": "PENDING",
+  "assignmentStatus": "AWAITING_ASSIGNMENT",
+  "paymentCategory": "DICH_VU",
+  "depositStatus": "PAID",
+  "depositAmount": 100000,
+  "depositPaidAmount": 100000,
+  "depositPaidAt": 1780200000000,
+  "depositPaymentId": "<paymentId>",
+  "paymentStatus": "SUCCESS",
+  "paymentUrl": null,
+  "isConfirmed": false,
+  "isTerminal": false
+}
+```
+
 DICH_VU failed response:
 ```json
 {
@@ -1193,9 +1225,12 @@ Errors:
 FE guidance:
 1. After DICH_VU `POST /appointment/book` returns `paymentUrl`, open the VNPay popup.
 2. Poll `GET /appointment/:appointmentId/deposit-status` from the parent page until `isTerminal=true` or `depositStatus=PAID|FAILED`.
-3. Show confirmed only when `depositStatus=PAID` and `appointmentStatus=CONFIRMED`.
-4. If the popup closes early, keep polling or offer a refresh-status action.
-5. Treat `depositAmount` as intended amount only. Use `depositPaidAmount` with `depositStatus=PAID` as verified payment evidence.
+3. For normal doctor-selected `DICH_VU`, show confirmed only when `depositStatus=PAID` and `appointmentStatus=CONFIRMED`.
+4. For broad `DICH_VU`, render `appointmentStatus=PENDING + depositStatus=PAID + assignmentStatus=AWAITING_ASSIGNMENT` as paid and waiting for doctor assignment; confirmation happens only after receptionist doctor/slot assignment.
+5. Render `appointmentStatus=FAILED + depositStatus=FAILED` as payment failed/expired.
+6. Render `appointmentStatus=CANCELLED + reasonCode=ASSIGNMENT_TIMEOUT` as system auto-cancelled because no doctor could be assigned in time.
+7. If the popup closes early, keep polling or offer a refresh-status action.
+8. Treat `depositAmount` as intended amount only. Use `depositPaidAmount` with `depositStatus=PAID` as verified payment evidence.
 
 ### GET /appointment/today
 Description: Get today's appointments for authenticated doctor.
@@ -1407,17 +1442,21 @@ EventEmitter2 events (server-internal): `appointment.assignment.created`, `appoi
 Notifications (reuse the existing notification pipeline → DB + socket via the Redis bridge). All are delivered through the `/notification` namespace as `NOTIFICATION_RECEIVED` and persisted (queryable via the notification list APIs):
 - `ASSIGNMENT_TASK_CREATED` — to **every** `RECEPTIONIST` account when a broad appointment is created. `recipientRole: "RECEPTIONIST"`, `data`: `{ taskId, appointmentId, specialty, reasonForAppointment, deadlineAt, priority, online }`, keys: `notification.receptionist.assignmentTaskCreated.*`. `online: boolean` indicates whether Redis role-aware presence saw **that** receptionist online at emit time (the BE resolves online receptionists from `online_role:RECEPTIONIST` to target realtime; offline receptionists still get the persisted notification). Idempotency key `ASSIGNMENT_TASK_CREATED:<taskId>:<recipientEmail>`.
 - `ASSIGNMENT_TASK_REMINDER` — to receptionists when a `PENDING` task nears its deadline (SLA sweep). `recipientRole: "RECEPTIONIST"`, `data`: `{ taskId, appointmentId, deadlineAt, reminderCount, online }`, keys: `notification.receptionist.assignmentTaskReminder.*`. Idempotency key `ASSIGNMENT_TASK_REMINDER:<taskId>:<reminderCount>:<recipientEmail>` (each reminder bump is a distinct notification; a retry of the same reminder dedupes).
-- `ASSIGNMENT_TASK_EXPIRED` — to receptionists when a `PENDING` task passes `deadline + grace` and is marked `EXPIRED` (needs manual attention). `recipientRole: "RECEPTIONIST"`, `data`: `{ taskId, appointmentId, deadlineAt, online }`, keys: `notification.receptionist.assignmentTaskExpired.*`. Idempotency key `ASSIGNMENT_TASK_EXPIRED:<taskId>:<recipientEmail>`.
+- `ASSIGNMENT_TASK_EXPIRED` - to receptionists when an actionable broad assignment task passes `deadline + grace`, is marked `EXPIRED`, and the related appointment is automatically cancelled. `recipientRole: "RECEPTIONIST"`, `data`: `{ taskId, appointmentId, deadlineAt, actor, reasonCode, online }`, with `actor = "SYSTEM"` and `reasonCode = "ASSIGNMENT_TIMEOUT"`, keys: `notification.receptionist.assignmentTimeoutExpired.*`. Idempotency key `ASSIGNMENT_TASK_EXPIRED:<taskId>:<recipientEmail>`.
 - `APPOINTMENT_DOCTOR_ASSIGNED` — to the patient when a doctor/slot is assigned. `recipientRole: "PATIENT"`, `data`: `{ appointmentId, doctorId, timeSlotId, appointmentDate, scheduledAt, patientEmail }`, keys: `notification.patient.doctorAssigned.*`. Idempotency key `APPOINTMENT_DOCTOR_ASSIGNED:<appointmentId>:<recipientEmail>`.
+- `APPOINTMENT_CANCELLED` with `reasonCode = "ASSIGNMENT_TIMEOUT"` - to the patient when assignment timeout auto-cancels the appointment. `data` includes `{ appointmentId, actor, reasonCode, assignmentTaskId, deadlineAt, refundAmount, shouldRefund }`; copy must say the system could not assign a doctor in time, not that the patient cancelled.
 
 Notification DTOs include `recipientEmail`, `recipientRole`, `titleKey`, `messageKey`, safe fallback `title`/`message`, structured `data`, `isRead`, and `createdAt` epoch milliseconds UTC. FE must format `deadlineAt`, `appointmentDate`, and `scheduledAt`.
 
 These are delivered through the existing `/notification` socket namespace and the notification list APIs; an MVP FE may also rely on polling `GET /appointment/assignment-tasks?status=PENDING`. **The DB assignment-task queue remains the source of truth** — realtime notifications are a best-effort nudge, so the receptionist UI must still work from polling if a notification is missed.
 
+Refresh expectations: `ASSIGNMENT_TASK_CREATED` refreshes the receptionist queue; `ASSIGNMENT_TASK_EXPIRED` refreshes the receptionist queue; `APPOINTMENT_CANCELLED` with `reasonCode=ASSIGNMENT_TIMEOUT` refreshes patient appointment state and the notification center. The `/appointment` namespace may also emit `APPOINTMENT_CANCELLED` with the same `reasonCode` for patient appointment-state refresh.
+
 ### Assignment SLA (server cron)
 A background sweep (every ~60s, single-instance via a Redis lock) manages stale tasks. Config (env, all optional with defaults): `ASSIGNMENT_DEADLINE_MINUTES=30`, `ASSIGNMENT_REMINDER_WINDOW_MINUTES=10`, `ASSIGNMENT_REMINDER_INTERVAL_MINUTES=5`, `ASSIGNMENT_GRACE_MINUTES=5`, `ASSIGNMENT_ACCEPT_TTL_MINUTES=10`.
 - Reminder: `PENDING` tasks near the deadline emit `appointment.assignment.reminder` (rate-limited via `lastNotifiedAt`) → a receptionist `ASSIGNMENT_TASK_REMINDER` notification.
-- Expiry: `PENDING` tasks past `deadline + grace` become `EXPIRED` (emit `appointment.assignment.expired`) → a receptionist `ASSIGNMENT_TASK_EXPIRED` notification. No auto-refund, no auto-cancel of the appointment — left for manual handling (admin escalation is a future improvement).
+- Expiry: actionable `PENDING` broad tasks past `deadline + grace` are system-cancelled as assignment timeout: task `EXPIRED`, appointment `CANCELLED`, `actor=SYSTEM`, `reasonCode=ASSIGNMENT_TIMEOUT`, emit `appointment.assignment.expired` -> receptionist `ASSIGNMENT_TASK_EXPIRED`, emit patient `APPOINTMENT_CANCELLED`, and refund paid `DICH_VU` deposits through the existing safe credit refund path. `BHYT` / `NOT_REQUIRED` does not refund.
+- Legacy policy: no heavy migration/reconciliation in this task. The scheduler skips legacy broad `DICH_VU` tasks while `depositStatus=PENDING`; future manual/admin reconciliation can handle old records separately if needed.
 - Stale-accept reclaim: `ASSIGNED` tasks idle past the accept TTL return to `PENDING`.
 
 ## Chat
@@ -2061,8 +2100,10 @@ Behavior:
 - Verify VNPay signature and response code.
 - Process result idempotently (duplicate callbacks do not double-update).
 - If callback is for `Payment.purpose = APPOINTMENT_DEPOSIT`:
-  - success marks the deposit `PAID`, stores `depositPaidAmount/depositPaidAt/depositPaymentId`, confirms the appointment, and emits `appointment.booking.success`.
-  - failure marks the deposit `FAILED`, marks the appointment `FAILED`, releases the slot, and does not create a Visit.
+  - normal doctor-selected success marks the deposit `PAID`, stores `depositPaidAmount/depositPaidAt/depositPaymentId`, confirms the appointment, and emits `appointment.booking.success`.
+  - broad `DICH_VU` success marks the deposit `PAID`, stores `depositPaidAmount/depositPaidAt/depositPaymentId`, keeps appointment `PENDING`, creates exactly one assignment task, and does not emit `appointment.booking.success`.
+  - normal doctor-selected failure marks the deposit `FAILED`, marks the appointment `FAILED`, releases the slot, and does not create a Visit.
+  - broad `DICH_VU` failure/expiry marks the deposit `FAILED`, marks the appointment `FAILED`, does not refund, does not release a doctor slot, and does not invoke assignment-timeout side effects.
 - If callback is for `Payment.purpose = BILLING`:
   - success sets `Payment.status = SUCCESS`, sets `Billing.status = PAID`, commits credit/coin deductions and coin reward, and emits `domain.payment.success`.
 - If checksum invalid: reject the callback.

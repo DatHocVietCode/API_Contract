@@ -66,12 +66,13 @@ Transport is unchanged: connect `/notification`, listen `NOTIFICATION_RECEIVED`,
 // payload.type -> payload.data
 ASSIGNMENT_TASK_CREATED   // receptionists: a new broad booking needs a doctor
 ASSIGNMENT_TASK_REMINDER  // receptionists: a pending task is near its deadline (data.reminderCount)
-ASSIGNMENT_TASK_EXPIRED   // receptionists: a task passed its deadline -> needs manual handling
+ASSIGNMENT_TASK_EXPIRED   // receptionists: task expired -> appointment auto-cancelled
 APPOINTMENT_DOCTOR_ASSIGNED // patient: a doctor/slot was assigned to their broad booking
+APPOINTMENT_CANCELLED     // patient: refresh state; reasonCode=ASSIGNMENT_TIMEOUT means system auto-cancel
 ```
 
 Receptionist app: on any of the three `ASSIGNMENT_TASK_*` events, refresh the queue and/or bump the
-bell. Patient app: on `APPOINTMENT_DOCTOR_ASSIGNED`, refresh the appointment + notify the patient.
+bell. Patient app: on `APPOINTMENT_DOCTOR_ASSIGNED` or `APPOINTMENT_CANCELLED`, refresh the appointment + notify the patient.
 
 Notes:
 - `data.online` (on the receptionist events) is informational only — do not branch correctness on it.
@@ -94,9 +95,14 @@ plus the normal `serviceType` / `paymentMethod` / `paymentCategory`. (`DICH_VU` 
 positive `depositAmount` upfront; `BHYT` requires none.)
 
 Response (`code: "PENDING"`): `{ appointmentId, assignmentTaskId, assignmentStatus: "AWAITING_ASSIGNMENT", depositStatus, depositAmount, paymentUrl? }`.
-- For `DICH_VU`, redirect to `paymentUrl` (the deposit must be paid before a receptionist can assign).
+- For `DICH_VU`, redirect to `paymentUrl`; `assignmentTaskId` is `null`/absent until deposit success creates the assignment task.
+- For `BHYT` / no-deposit, `assignmentTaskId` is returned immediately.
+- After broad `DICH_VU` deposit success, the backend keeps `appointmentStatus=PENDING`, sets `depositStatus=PAID`, creates exactly one assignment task, and emits `ASSIGNMENT_TASK_CREATED`.
+- Broad `DICH_VU` payment failure/expiry renders as `appointmentStatus=FAILED + depositStatus=FAILED`; no refund and no doctor slot release.
 - Patient UI should show "Waiting for a receptionist to assign a doctor"; the patient is notified via
   `APPOINTMENT_DOCTOR_ASSIGNED` when assignment completes.
+- Patient UI should render `PENDING + PAID + AWAITING_ASSIGNMENT` as paid and waiting for doctor assignment.
+- Patient UI should render `CANCELLED + reasonCode=ASSIGNMENT_TIMEOUT` as system auto-cancelled because no doctor could be assigned in time; show refund info when present.
 
 (Normal doctor-selected booking is unchanged and still requires `doctor` + `timeSlotId`.)
 
@@ -110,5 +116,6 @@ Response (`code: "PENDING"`): `{ appointmentId, assignmentTaskId, assignmentStat
 
 ## 5. Out of scope / known limitations (so the FE doesn't design around them)
 - No Redis/RabbitMQ-down recovery and no Outbox — if realtime is missed, **polling is the fallback**.
-- Expiry notifies receptionists only (no admin escalation yet).
+- No heavy legacy migration/reconciliation is included. Legacy broad `DICH_VU` tasks with `depositStatus=PENDING` are skipped by the scheduler.
+- Expiry notifies receptionists and patients (no admin escalation yet).
 - These are intentional for the current (thesis) scope; design the receptionist UI to be polling-correct.
