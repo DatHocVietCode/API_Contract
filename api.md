@@ -283,6 +283,97 @@ Response (Error):
 }
 ```
 
+### POST /receptionist/visits/:visitId/vital-signs
+Description: Append a clinical vital-sign measurement session for the patient linked to a visit.
+Auth: Required (JWT, RECEPTIONIST)
+
+MVP scope:
+- This endpoint is independent from `PATCH /receptionist/visits/:visitId/check-in`.
+- Check-in may succeed without vital signs.
+- Vital signs may be recorded after check-in and may be recorded more than once.
+- The server derives `patientId`, `appointmentId`, `visitId`, `measuredBy`, and `source` from the visit and authenticated receptionist.
+- Records created by this endpoint use `source = RECEPTIONIST_CHECK_IN`.
+- Vital-sign records are append-only. Existing measurement values must never be silently overwritten or destructively deleted.
+
+Request body:
+```ts
+export interface CreatePatientVitalSignRequestDto {
+  heightCm?: number;
+  weightKg?: number;
+  bloodPressureSystolic?: number;
+  bloodPressureDiastolic?: number;
+  heartRateBpm?: number;
+  bloodType?: string;
+  measuredAt?: number;
+  note?: string;
+}
+```
+
+Validation:
+- At least one actual measurement is required: `heightCm`, `weightKg`, complete blood pressure, or `heartRateBpm`.
+- `bloodType` alone is not a valid vital-sign measurement session.
+- Blood pressure is atomic: systolic and diastolic must both be supplied or both be omitted.
+- Omitted metrics remain absent; they are not stored as `0` or `UNKNOWN`.
+- `bmi`, metric statuses, identity, source, record state, and audit fields are server-generated and are not accepted from clients.
+- Backend validates physiological input ranges. These validation/classification thresholds are backend-owned and are not part of frontend logic.
+- `measuredAt`, when provided, is epoch milliseconds UTC. If omitted, server current time is used.
+- Reject `measuredAt` beyond the allowed future clock skew (recommended maximum: 5 minutes) or before the visit's reasonable intake window.
+
+Response (Success):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Vital signs recorded successfully",
+  "data": {
+    "id": "vital-sign-record-id",
+    "patientId": "patient-id",
+    "appointmentId": "appointment-id",
+    "visitId": "visit-id",
+    "heightCm": 172,
+    "weightKg": 68,
+    "bmi": 23,
+    "bloodPressureSystolic": 118,
+    "bloodPressureDiastolic": 76,
+    "heartRateBpm": 72,
+    "status": {
+      "bmi": "NORMAL",
+      "bloodPressure": "NORMAL",
+      "heartRate": "NORMAL",
+      "weight": "NORMAL"
+    },
+    "source": "RECEPTIONIST_CHECK_IN",
+    "recordState": "ACTIVE",
+    "measuredAt": 1781740800000,
+    "measuredBy": {
+      "id": "receptionist-account-id",
+      "name": "Nguyen Van B",
+      "role": "RECEPTIONIST"
+    },
+    "createdAt": 1781740810000
+  }
+}
+```
+
+### POST /receptionist/vital-signs/:recordId/corrections
+Description: Atomically create a corrected `ACTIVE` revision and mark the replaced record `SUPERSEDED`.
+Auth: Required (JWT, RECEPTIONIST)
+
+Rules:
+- `correctionReason` is required.
+- The new record references the replaced record through `supersedesRecordId`.
+- Existing measurement values and timestamps on the superseded record remain unchanged.
+- Corrections preserve the original `measuredAt` unless an explicit corrected epoch-millisecond value is supplied.
+- The backend recalculates derived BMI and all classifications for the corrected record.
+
+### PATCH /receptionist/vital-signs/:recordId/void
+Description: Mark an invalid vital-sign record `VOIDED` without deleting or changing its original measurement values.
+Auth: Required (JWT, RECEPTIONIST)
+
+Rules:
+- A void reason is required.
+- The state/audit update is atomic.
+- Voided records are excluded from patient dashboard summaries but retained for audit.
+
 ## Doctor (Phase 3 Visit-Based Workflow)
 
 Role authorization:
@@ -1578,6 +1669,196 @@ Query: `page`, `limit`, `keyword`
 ### GET /patients/me
 Description: Get authenticated patient's profile (by JWT email).
 Auth: Required (JWT)
+
+### GET /patients/me/health-summary
+Description: Get the authenticated patient's bounded, read-only vital-sign dashboard summary.
+Auth: Required (JWT, PATIENT)
+Query:
+- `limit` (optional integer): default `10`, maximum `50`
+
+Response envelope:
+```ts
+DataResponse<PatientHealthSummaryDto>
+```
+
+Contract types:
+```ts
+export type HealthMetricStatus = "NORMAL" | "LOW" | "HIGH" | "UNKNOWN";
+
+export type OverallHealthStatus =
+  | "STABLE"
+  | "NEEDS_ATTENTION"
+  | "UNEVALUATED";
+
+export type VitalSignRecordState = "ACTIVE" | "SUPERSEDED" | "VOIDED";
+
+export type VitalSignSource =
+  | "RECEPTIONIST_CHECK_IN"
+  | "VISIT_INTAKE"
+  | "MIGRATED"
+  | "UNKNOWN";
+
+export interface PatientHealthSummaryDto {
+  patientId: string;
+  latest: PatientVitalSignRecordDto | null;
+  history: PatientVitalSignRecordDto[];
+  overallStatus: OverallHealthStatus;
+  generatedAt: number;
+}
+
+export interface PatientVitalSignRecordDto {
+  id: string;
+  patientId: string;
+  appointmentId?: string;
+  visitId?: string;
+
+  bloodType?: string;
+  heightCm?: number;
+  weightKg?: number;
+  bmi?: number;
+  bloodPressureSystolic?: number;
+  bloodPressureDiastolic?: number;
+  heartRateBpm?: number;
+
+  status?: {
+    bmi?: HealthMetricStatus;
+    bloodPressure?: HealthMetricStatus;
+    heartRate?: HealthMetricStatus;
+    weight?: HealthMetricStatus;
+  };
+
+  source: VitalSignSource;
+  recordState: VitalSignRecordState;
+  measuredAt: number;
+  measuredBy?: {
+    id: string;
+    name?: string;
+    role: "RECEPTIONIST" | "DOCTOR" | "NURSE" | "SYSTEM";
+  };
+
+  supersedesRecordId?: string;
+  correctionReason?: string;
+  correctedBy?: {
+    id: string;
+    role: "RECEPTIONIST" | "DOCTOR" | "NURSE" | "SYSTEM";
+  };
+
+  note?: string;
+  createdAt: number;
+  updatedAt?: number;
+}
+```
+
+Field meanings and ownership:
+- All timestamps in this contract are epoch milliseconds.
+- `measuredAt`: when the measurement physically occurred.
+- `createdAt`: when the record was persisted.
+- `updatedAt`: when record metadata/state was changed, for example `SUPERSEDED` or `VOIDED`.
+- `generatedAt`: when the health-summary response was generated.
+- `latest`: newest `ACTIVE` measurement session.
+- `history`: bounded `ACTIVE` measurement sessions only; no audit states.
+- `overallStatus`: backend-owned aggregate status. Frontend must not derive it.
+- `status`: backend-owned metric classifications. Frontend must not apply clinical thresholds.
+- `bmi`: backend-derived value. Frontend must not calculate or repair BMI.
+- `bloodType`: optional compatibility snapshot, display-only for this dashboard and excluded from status aggregation.
+- `source`: server-assigned provenance. Current write-side MVP creates `RECEPTIONIST_CHECK_IN`; other enum values are reserved for future flows.
+
+History and latest rules:
+- Return `ACTIVE` records only.
+- Order `history` by `measuredAt` descending, then `createdAt` descending.
+- When non-empty, `latest` must equal `history[0]`.
+- When empty, `latest = null` and `overallStatus = UNEVALUATED`.
+
+Backend aggregation precedence:
+1. No latest record: `UNEVALUATED`.
+2. Any relevant measured metric is `LOW` or `HIGH`: `NEEDS_ATTENTION`.
+3. Any relevant measured metric is `UNKNOWN` or missing classification: `UNEVALUATED`.
+4. Every relevant measured metric is explicitly `NORMAL`: `STABLE`.
+
+Non-classified values such as `bloodType` do not affect `overallStatus`.
+
+Response (Empty data, HTTP 200):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched patient health summary successfully",
+  "data": {
+    "patientId": "patient-id",
+    "latest": null,
+    "history": [],
+    "overallStatus": "UNEVALUATED",
+    "generatedAt": 1781740800000
+  }
+}
+```
+
+Response (Mock-shaped populated example):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched patient health summary successfully",
+  "data": {
+    "patientId": "patient-id",
+    "latest": {
+      "id": "vital-sign-5",
+      "patientId": "patient-id",
+      "appointmentId": "appointment-id-5",
+      "visitId": "visit-id-5",
+      "bloodType": "A+",
+      "heightCm": 172,
+      "weightKg": 68,
+      "bmi": 23,
+      "bloodPressureSystolic": 118,
+      "bloodPressureDiastolic": 76,
+      "heartRateBpm": 72,
+      "status": {
+        "bmi": "NORMAL",
+        "bloodPressure": "NORMAL",
+        "heartRate": "NORMAL",
+        "weight": "NORMAL"
+      },
+      "source": "RECEPTIONIST_CHECK_IN",
+      "recordState": "ACTIVE",
+      "measuredAt": 1781740800000,
+      "measuredBy": {
+        "id": "receptionist-account-id",
+        "name": "Nguyen Van B",
+        "role": "RECEPTIONIST"
+      },
+      "createdAt": 1781740810000
+    },
+    "history": [
+      {
+        "id": "vital-sign-5",
+        "patientId": "patient-id",
+        "bloodPressureSystolic": 118,
+        "bloodPressureDiastolic": 76,
+        "heartRateBpm": 72,
+        "source": "RECEPTIONIST_CHECK_IN",
+        "recordState": "ACTIVE",
+        "measuredAt": 1781740800000,
+        "createdAt": 1781740810000
+      }
+    ],
+    "overallStatus": "STABLE",
+    "generatedAt": 1781740900000
+  }
+}
+```
+
+Error semantics:
+- Existing patient with no vital signs: HTTP `200` with the empty summary above.
+- Patient profile missing: HTTP `404`, stable code `PATIENT_NOT_FOUND`.
+- Route not deployed/not found: HTTP `404`, stable code `ROUTE_NOT_FOUND`.
+- Clients must not treat `PATIENT_NOT_FOUND` as empty clinical data.
+
+Audit requirements:
+- Vital-sign records are append-only by default.
+- Corrections create a new `ACTIVE` record and atomically mark the replaced record `SUPERSEDED`.
+- `supersedesRecordId` links the corrected record to its predecessor.
+- Voiding retains original values and requires a reason.
+- No destructive update or deletion of clinical measurement values.
+- Audit/admin endpoints may expose all states; this patient summary endpoint must not.
 
 ### GET /patients/by-account
 Description: Get patient record by authenticated account id.
