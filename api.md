@@ -319,40 +319,52 @@ Validation:
 - `measuredAt`, when provided, is epoch milliseconds UTC. If omitted, server current time is used.
 - Reject `measuredAt` beyond the allowed future clock skew (recommended maximum: 5 minutes) or before the visit's reasonable intake window.
 
+Response envelope: `DataResponse<CreatePatientVitalSignResponseDto>`
+```ts
+export interface CreatePatientVitalSignResponseDto {
+  vitalSign: PatientVitalSignRecordDto;
+}
+```
+
 Response (Success):
 ```json
 {
   "code": "SUCCESS",
-  "message": "Vital signs recorded successfully",
+  "message": "Created patient vital sign successfully",
   "data": {
-    "id": "vital-sign-record-id",
-    "patientId": "patient-id",
-    "appointmentId": "appointment-id",
-    "visitId": "visit-id",
-    "heightCm": 172,
-    "weightKg": 68,
-    "bmi": 23,
-    "bloodPressureSystolic": 118,
-    "bloodPressureDiastolic": 76,
-    "heartRateBpm": 72,
-    "status": {
-      "bmi": "NORMAL",
-      "bloodPressure": "NORMAL",
-      "heartRate": "NORMAL",
-      "weight": "NORMAL"
-    },
-    "source": "RECEPTIONIST_CHECK_IN",
-    "recordState": "ACTIVE",
-    "measuredAt": 1781740800000,
-    "measuredBy": {
-      "id": "receptionist-account-id",
-      "name": "Nguyen Van B",
-      "role": "RECEPTIONIST"
-    },
-    "createdAt": 1781740810000
+    "vitalSign": {
+      "id": "vital-sign-record-id",
+      "patientId": "patient-id",
+      "appointmentId": "appointment-id",
+      "visitId": "visit-id",
+      "heightCm": 172,
+      "weightKg": 68,
+      "bmi": 23,
+      "bloodPressureSystolic": 118,
+      "bloodPressureDiastolic": 76,
+      "heartRateBpm": 72,
+      "status": {
+        "bmi": "NORMAL",
+        "bloodPressure": "NORMAL",
+        "heartRate": "NORMAL"
+      },
+      "source": "RECEPTIONIST_CHECK_IN",
+      "recordState": "ACTIVE",
+      "measuredAt": 1781740800000,
+      "measuredBy": {
+        "id": "receptionist-account-id",
+        "name": "Nguyen Van B",
+        "role": "RECEPTIONIST"
+      },
+      "createdAt": 1781740810000
+    }
   }
 }
 ```
+
+> `status.weight` is reserved and **not populated** in MVP (weight alone is not clinically
+> classifiable without height). Use `status.bmi` as the body-composition indicator. MVP also
+> only accepts/returns `bloodType` in `A | B | AB | O` (no Rh factor).
 
 ### POST /receptionist/vital-signs/:recordId/corrections
 Description: Atomically create a corrected `ACTIVE` revision and mark the replaced record `SUPERSEDED`.
@@ -1804,7 +1816,7 @@ Response (Mock-shaped populated example):
       "patientId": "patient-id",
       "appointmentId": "appointment-id-5",
       "visitId": "visit-id-5",
-      "bloodType": "A+",
+      "bloodType": "A",
       "heightCm": 172,
       "weightKg": 68,
       "bmi": 23,
@@ -1814,8 +1826,7 @@ Response (Mock-shaped populated example):
       "status": {
         "bmi": "NORMAL",
         "bloodPressure": "NORMAL",
-        "heartRate": "NORMAL",
-        "weight": "NORMAL"
+        "heartRate": "NORMAL"
       },
       "source": "RECEPTIONIST_CHECK_IN",
       "recordState": "ACTIVE",
@@ -1848,9 +1859,13 @@ Response (Mock-shaped populated example):
 
 Error semantics:
 - Existing patient with no vital signs: HTTP `200` with the empty summary above.
-- Patient profile missing: HTTP `404`, stable code `PATIENT_NOT_FOUND`.
-- Route not deployed/not found: HTTP `404`, stable code `ROUTE_NOT_FOUND`.
-- Clients must not treat `PATIENT_NOT_FOUND` as empty clinical data.
+- Patient profile missing: HTTP `404`, stable code `PATIENT_NOT_FOUND` (in the standard envelope).
+- Route not deployed/not found: the backend does **not** emit `ROUTE_NOT_FOUND` for this endpoint
+  (an unmatched route never reaches the handler). It returns Nest's default 404 shape
+  (`Cannot GET ...`, no `code` field). `ROUTE_NOT_FOUND` is reserved for the FE mock-fallback
+  layer to classify such a default-shaped 404 — only while a mock-fallback flag is enabled.
+- Clients must not treat `PATIENT_NOT_FOUND` as empty clinical data, and must never let
+  `PATIENT_NOT_FOUND` trigger mock fallback.
 
 Audit requirements:
 - Vital-sign records are append-only by default.
