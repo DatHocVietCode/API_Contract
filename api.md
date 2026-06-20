@@ -227,12 +227,16 @@ Response:
 ### GET /receptionist/visits
 Description: Fetch today's receptionist visit list for check-in workflow.
 Auth: Required (JWT, RECEPTIONIST)
-Query: none
+Query:
+- `timezone?: string` (optional IANA timezone, for example `Asia/Ho_Chi_Minh`)
+- Missing, empty, or invalid values fall back to `Asia/Ho_Chi_Minh`.
 Filter rule:
 - Uses `appointment.scheduledAt` as the source of truth.
-- Returns visits scheduled for the current day in UTC.
+- Resolves the current local calendar day in the effective timezone.
+- Converts that local start-of-day/end-of-day range to UTC epoch milliseconds for filtering.
+- Response timestamps remain UTC epoch milliseconds.
 Sort:
-- ascending by `scheduledAt`
+- ascending by `scheduledAt` within the resolved local-day range
 Response (Success):
 ```json
 {
@@ -397,12 +401,20 @@ Role authorization:
 ### GET /doctor/visits/today
 Description: Fetch today's visits for the authenticated doctor. Uses `Visit` as the primary data source and joins `Appointment` only for display fields (e.g., `scheduledAt`).
 Auth: Required (JWT, DOCTOR)
-Query: none
+Query:
+- `timezone?: string` (optional IANA timezone, for example `Asia/Ho_Chi_Minh`)
+- Missing, empty, or invalid values fall back to `Asia/Ho_Chi_Minh`.
 
 Filter rules:
 - Only return visits where `status` IN [`CHECKED_IN`, `IN_PROGRESS`].
 - Exclude `CREATED` and `COMPLETED` visits.
-- Only return visits whose linked `appointment.scheduledAt` falls within the current UTC day.
+- Resolve the current local calendar day in the effective timezone.
+- Convert that local start-of-day/end-of-day range to UTC epoch milliseconds.
+- Only return visits whose linked `appointment.scheduledAt` falls within that range.
+- Response timestamps remain UTC epoch milliseconds.
+
+Sort:
+- ascending by `scheduledAt` within the resolved local-day range
 
 Response (Success):
 ```json
