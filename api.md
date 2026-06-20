@@ -21,6 +21,7 @@ Typed keys currently supported by `NotificationMap`:
 - `COIN_EXPIRY_REMINDER`
 - `APPOINTMENT_SUCCESS`
 - `APPOINTMENT_CANCELLED`
+- `APPOINTMENT_NO_SHOW`
 - `APPOINTMENT_RESCHEDULED`
 - `PAYMENT_SUCCESS`
 - `ASSIGNMENT_TASK_CREATED`
@@ -975,6 +976,10 @@ Query:
 - `page`: number
 - `limit`: number
 Response: `{ code, message, data }`
+- Each appointment item carries a derived `actionable: boolean`. It is `false` for terminal
+  statuses and for any non-broad appointment whose scheduled end + grace has already passed.
+  The FE must hide cancel/reschedule actions when `actionable === false` — a past appointment is
+  non-actionable immediately, even before the no-show reconciler flips it to `NO_SHOW`.
 
 ### POST /appointment/book
 Description: Book an appointment. Patient identity is derived from JWT.
@@ -1228,7 +1233,7 @@ Params:
 
 Response fields:
 - `appointmentId`: string
-- `appointmentStatus`: `PENDING | CONFIRMED | FAILED | CANCELLED | COMPLETED | RESCHEDULED`
+- `appointmentStatus`: `PENDING | CONFIRMED | FAILED | CANCELLED | COMPLETED | RESCHEDULED | NO_SHOW`
 - `assignmentStatus`: `NONE | AWAITING_ASSIGNMENT | ASSIGNED` when available.
 - `paymentCategory`: `BHYT | DICH_VU`
 - `depositStatus`: `NOT_REQUIRED | PENDING | PAID | FAILED | REFUNDED | FORFEITED`
@@ -1239,7 +1244,7 @@ Response fields:
 - `paymentStatus`: linked payment status `PENDING | SUCCESS | FAILED` or `null`.
 - `paymentUrl`: always `null`. This endpoint never creates or refreshes payments.
 - `isConfirmed`: `true` when appointment is `CONFIRMED` or `COMPLETED`.
-- `isTerminal`: `true` when deposit status is terminal or appointment is `FAILED` / `CANCELLED`.
+- `isTerminal`: `true` when deposit status is terminal or appointment is `FAILED` / `CANCELLED` / `NO_SHOW`.
 
 DICH_VU pending response:
 ```json
@@ -1377,6 +1382,7 @@ Behavior:
 - Keeps existing `bookingDate` unchanged.
 - Uses Redis slot lock (`slot:{doctorId}:{timeSlotId}`) and conflict check that excludes the current appointment.
 - Prevents reschedule to past time.
+- Blocks reschedule of an appointment whose own scheduled end has already passed (`APPOINTMENT_TIME_PASSED`); a lapsed appointment is a no-show candidate, not a reschedule candidate.
 
 Response (Success):
 ```json
@@ -1407,6 +1413,7 @@ Visit-based cancellation rules (normal / assigned appointments):
 - Linked `Visit` must exist and have status `CREATED`.
 - Cancellation is blocked once the visit is `CHECKED_IN`, `IN_PROGRESS`, `COMPLETED`, or any status other than `CREATED`.
 - Cancellation is blocked within 24 hours of the scheduled appointment time.
+- Cancellation is blocked once the scheduled end time has passed (`APPOINTMENT_TIME_PASSED`); a past appointment is a no-show candidate, not a cancellation.
 - Cancellation is blocked if a `MedicalEncounter`, `Billing`, or related `Payment` exists.
 - On success, backend sets `Appointment.status = CANCELLED`, `Visit.status = CANCELLED`, and releases the `TimeSlotLog` to `available`.
 - Only the owning patient or staff with `ADMIN` / `RECEPTIONIST` role may cancel.
@@ -1431,6 +1438,7 @@ Deposit refund rules:
 
 Blocked reason codes:
 - `APPOINTMENT_NOT_CANCELABLE`
+- `APPOINTMENT_TIME_PASSED`
 - `VISIT_ALREADY_STARTED`
 - `VISIT_COMPLETED`
 - `MEDICAL_ENCOUNTER_EXISTS`
@@ -1444,6 +1452,51 @@ Blocked reason codes:
 ### PATCH /appointment/:id/confirm
 Description: Confirm appointment.
 Auth: Public
+
+### PATCH /appointment/:appointmentId/no-show
+Description: Manually mark an overdue confirmed appointment as no-show (staff fallback for the
+automatic reconciler). Thin endpoint; all rules live in the shared transition core.
+Auth: Required (JWT) + role `RECEPTIONIST` or `ADMIN`. Hidden from the patient UI.
+Params:
+- `appointmentId`: appointment id
+
+Eligibility (identical to the reconciler — enforced server-side):
+- `appointmentStatus = CONFIRMED`, with a concrete `doctorId` and `timeSlot`.
+- Scheduled end + grace (`NO_SHOW_GRACE_MINUTES`, default 120) has passed.
+- Linked `Visit` exists and is still `CREATED` (patient never checked in).
+- No `MedicalEncounter` and no `Billing` for the visit.
+
+Effects on success:
+- `Appointment.appointmentStatus = NO_SHOW`; durable markers `noShowAt`, `noShowActor` (`STAFF` here),
+  `noShowMarkedByAccountId`, `noShowSource = MANUAL`.
+- `Visit.status = NO_SHOW`.
+- A paid `DICH_VU` deposit is **forfeited** (`depositStatus = FORFEITED`) — no refund, unlike cancellation.
+- The slot is **not** released and no billing is created.
+- Patient (in-app + email) and doctor are notified; the manual action emails immediately. All side
+  effects are idempotent (per-appointment keys).
+
+Response: `{ code, message, data: { noShow, alreadyNoShow?, reason?, appointmentId } }`
+- Already-NO_SHOW returns success with `alreadyNoShow: true` (safe no-op).
+- An ineligible appointment returns `code: ERROR` with `data.reason` (e.g. `NOT_OVERDUE`, `VISIT_CHECKED_IN`, `ENCOUNTER_EXISTS`, `BILLING_EXISTS`, `NOT_CONFIRMED`, `NOT_ASSIGNED`, `NO_VISIT`).
+
+## No-Show Lifecycle (automatic reconciliation)
+
+A confirmed, doctor/slot-assigned appointment whose time passes without check-in becomes `NO_SHOW`
+(distinct from `CANCELLED`). This is settled by a backend reconciler — **not** a realtime sweep:
+- Runs once on application startup (catch-up after restart/deploy) and daily at 06:00
+  Asia/Ho_Chi_Minh. Restart-safe (state lives in MongoDB), Redis-locked, idempotent.
+- Same eligibility/effects as the manual endpoint above, with `noShowActor = SYSTEM` and
+  `noShowSource = STARTUP | DAILY_06AM`.
+- **Side-effect timing:** patient email is gated to business hours (06:00–20:00 local) with a
+  per-appointment idempotency key, so an out-of-hours startup run transitions silently and the next
+  in-hours run sends exactly one email. In-app notification + realtime refresh fire on every transition.
+- Realtime/notification: `APPOINTMENT_NO_SHOW` (notification bell via `NOTIFICATION_RECEIVED`; legacy
+  socket event `APPOINTMENT_NO_SHOW` on `/appointment`). Distinct from `ASSIGNMENT_TIMEOUT`, which
+  cancels a *broad/unassigned* appointment before any doctor/slot exists.
+
+The admin appointment lifecycle reconstructs a terminal `APPOINTMENT_NO_SHOW` node (+ `VISIT_NO_SHOW`,
++ `DEPOSIT_FORFEITED`) from these durable markers; a SYSTEM no-show is distinguished from a manual
+staff one via `noShowActor`/`noShowMarkedByAccountId`.
 
 ## Appointment Assignment Tasks (Broad Appointment Routing)
 
