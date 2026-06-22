@@ -135,9 +135,15 @@ export type PaymentSuccessData = {
 export type AppointmentDoctorAssignedData = {
   appointmentId?: string | null;
   doctorId?: string | null;
+  doctorName?: string | null; // NEW: resolved doctor display name (may be null)
   timeSlotId?: string | null;
   appointmentDate?: number | null; // epoch ms
   scheduledAt?: number | null; // epoch ms
+  startTime?: number | null; // NEW: slot start, epoch ms (may be null)
+  endTime?: number | null; // NEW: slot end, epoch ms (may be null)
+  hospitalName?: string | null; // NEW: location/hospital (may be null)
+  serviceType?: string | null; // NEW: e.g. KHAM_BHYT | KHAM_DICH_VU | KHAM_ONLINE
+  specialty?: string | null; // NEW: requested specialty (may be null)
   patientEmail?: string | null;
 };
 
@@ -263,3 +269,21 @@ FE bell and notification center should use only:
 - `NOTIFICATION_RECEIVED`
 - `GET /notifications/by-email`
 - `PATCH /notifications/:id/read`
+
+## 9. Changelog
+
+### 2026-06-22 — Richer `APPOINTMENT_DOCTOR_ASSIGNED` (doctor-assigned to broad booking)
+
+When a receptionist assigns a doctor/slot to a broad (unassigned) appointment, the
+patient notification is now self-explanatory.
+
+- **`data` gained optional fields** (all backward-compatible, may be `null`/absent):
+  `doctorName`, `hospitalName`, `startTime` (epoch ms), `endTime` (epoch ms),
+  `serviceType`, `specialty`. Existing fields are unchanged. **Time stays epoch ms** —
+  `scheduledAt`/`startTime`/`endTime` are numbers; FE still owns formatting.
+- **`message` fallback is now a complete sentence** (no raw epoch / `undefined` / `null`),
+  e.g. `"Bác sĩ Trần Văn A sẽ khám cho bạn lúc 09:30–10:00 22/06/2026 tại Bệnh viện UTE."`.
+  Preferred rendering is still `messageKey`/`titleKey` + `data`; this is only a safe fallback.
+- No type, event name, `idempotencyKey`, or transport change. FE handlers need no
+  migration — reading the new `data` fields is optional polish (e.g. show the doctor
+  name and a formatted time directly from `data` instead of refetching the appointment).
