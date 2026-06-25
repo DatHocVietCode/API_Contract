@@ -90,10 +90,13 @@ Response (Success):
     "id": "...",
     "patientId": "...",
     "doctorId": null,
+    "receptionistId": null,
     "profileId": "..."
   }
 }
 ```
+Notes:
+- `doctorId` is populated only when `role = DOCTOR`; `receptionistId` only when `role = RECEPTIONIST`; `patientId` only when `role = PATIENT`. The other id fields are `null`/omitted.
 Response (Error):
 ```json
 { "code": "ERROR", "message": "Invalid password", "data": null }
@@ -2240,6 +2243,92 @@ Description: Update authenticated user's profile.
 Auth: Required (JWT)
 Body: `UpdateProfileDto`
 
+## Admin – Staff Provisioning
+
+Admin-only endpoints that create a staff member as one consistent chain — `Account → Profile → Doctor` or `Account → Profile → Receptionist` — inside a single MongoDB transaction. If any step fails, nothing is persisted (no partial records). The account is created with status `ACTIVE`, and a temporary password is generated and emailed to the new user, so they can log in immediately. The password/hash is never returned.
+
+Auth (both endpoints): Required (JWT), role `ADMIN`. A non-admin token receives `403 Forbidden`.
+Content-Type: `application/json`, or `multipart/form-data` when uploading an `avatar` file (in multipart, send `profile`/`degree` as JSON strings — same convention as the legacy doctor endpoints).
+
+Shared success response `data` shape (no password/hash):
+```json
+{
+  "code": "SUCCESS",
+  "message": "Doctor created successfully",
+  "data": {
+    "account": { "id": "664...aaa", "email": "doctor@example.com", "role": "DOCTOR", "status": "ACTIVE" },
+    "profile": { "id": "664...bbb", "fullName": "Dr. Nguyen Van A", "phone": "0901234567" },
+    "doctor": { "id": "664...ccc", "specialtyId": "664...ddd" },
+    "emailSent": true
+  }
+}
+```
+- For receptionists, `doctor` is replaced by `receptionist: { "id": "..." }`.
+- `emailSent` is `false` when the records were committed but the credentials email failed to send (the admin should resend / trigger a password reset). The created user still exists and can log in.
+
+### POST /admin/doctors
+Description: Create a doctor (Account + Profile + Doctor) atomically.
+Auth: Required (JWT), role `ADMIN`
+Request Body:
+- `profile`: object (required)
+  - `name`: string (required)
+  - `email`: string (required, unique across accounts)
+  - `phone`: string (optional)
+  - `address`: string (optional)
+  - `gender`: string (optional)
+  - `dob`: string (optional, ISO 8601)
+  - `avatarUrl`: string (optional; or upload an `avatar` file via multipart)
+- `doctorName`: string (required)
+- `specialty`: string (optional, ChuyenKhoa ObjectId)
+- `bio`: string (optional)
+- `degree`: string[] (optional)
+- `academic`: string (optional)
+- `achievements`: string (optional)
+- `yearsOfExperience`: number (optional)
+
+Response (Success `200/201`): shared shape above with the `doctor` block.
+Error Responses:
+- `{ "code": "ERROR", "message": "Account with this email already exists", "data": null }` — duplicate email; no records created.
+- `{ "code": "ERROR", "message": "Doctor email is required", "data": null }` — missing `profile.email`.
+- `403 Forbidden` — caller is not an admin.
+
+Example Request:
+```http
+POST /api/admin/doctors
+Authorization: Bearer <admin-access-token>
+Content-Type: application/json
+
+{
+  "doctorName": "Dr. Nguyen Van A",
+  "specialty": "664a1b2c3d4e5f6789cccccc",
+  "degree": ["General Medicine"],
+  "yearsOfExperience": 10,
+  "profile": { "name": "Nguyen Van A", "email": "doctor@example.com", "phone": "0901234567" }
+}
+```
+
+### POST /admin/receptionists
+Description: Create a receptionist (Account + Profile + Receptionist) atomically.
+Auth: Required (JWT), role `ADMIN`
+Request Body:
+- `profile`: object (required) — same fields as `POST /admin/doctors`
+- `hospitalName`: string (optional)
+
+Response (Success `200/201`): shared shape above, with `receptionist: { "id": "..." }` instead of `doctor`.
+Error Responses: same as `POST /admin/doctors` (duplicate email, missing email, `403` for non-admin).
+
+Example Request:
+```http
+POST /api/admin/receptionists
+Authorization: Bearer <admin-access-token>
+Content-Type: application/json
+
+{
+  "hospitalName": "UTE Clinic",
+  "profile": { "name": "Reception Anna", "email": "anna@example.com", "phone": "0909999999" }
+}
+```
+
 ## Doctors
 
 ### GET /doctors/active
@@ -2247,8 +2336,8 @@ Description: List active doctors.
 Auth: Public
 
 ### POST /doctors
-Description: Create a doctor with account/profile (multipart supported).
-Auth: Public
+Description: Create a doctor with account/profile (multipart supported). **Admin-only** (previously public). Prefer the canonical `POST /admin/doctors` (see "Admin – Staff Provisioning"); both routes share the same logic and return the same structured response.
+Auth: Required (JWT), role `ADMIN`
 Body: `profile`, `degree`, `yearsOfExperience`, etc.
 
 ### GET /doctors/admin
