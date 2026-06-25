@@ -2329,6 +2329,74 @@ Content-Type: application/json
 }
 ```
 
+### GET /admin/receptionists
+Description: Paginated list of receptionists for the Admin Receptionists page. Joined `Account → Profile → Receptionist` and projected to a safe display DTO (no password/hash). Rows with missing/legacy profile or account data degrade gracefully (empty/`null` fields) instead of failing.
+Auth: Required (JWT), role `ADMIN`. Non-admin → `403 Forbidden`.
+Query (all optional):
+- `page`: number (default `1`, min `1`)
+- `limit`: number (default `20`, min `1`, max `100`)
+- `search`: string — case-insensitive substring match on `fullName` or `email`
+
+Response item (`ReceptionistListItem`) — date fields are epoch milliseconds UTC:
+```ts
+interface ReceptionistListItem {
+  receptionistId: string;
+  accountId: string | null;
+  profileId: string | null;
+  email: string;
+  fullName: string;
+  phone?: string;
+  gender?: string;
+  dateOfBirth?: number | null;   // epoch ms
+  address?: string;
+  avatarUrl?: string;
+  hospitalName?: string;
+  accountStatus?: string;        // ACTIVE | INACTIVE | BLOCKED
+  createdAt?: number;            // epoch ms
+  updatedAt?: number;            // epoch ms
+}
+
+interface ReceptionistListResponse {
+  receptionists: ReceptionistListItem[];
+  pagination: { total: number; page: number; limit: number; totalPages: number };
+}
+```
+
+Success Response `200`:
+```json
+{
+  "code": "SUCCESS",
+  "message": "Fetched receptionists successfully",
+  "data": {
+    "receptionists": [
+      {
+        "receptionistId": "664...ccc",
+        "accountId": "664...aaa",
+        "profileId": "664...bbb",
+        "email": "anna@example.com",
+        "fullName": "Reception Anna",
+        "phone": "0909999999",
+        "gender": "female",
+        "dateOfBirth": 642297600000,
+        "address": "HCM",
+        "avatarUrl": "https://res.cloudinary.com/example/image/upload/profiles/anna.png",
+        "hospitalName": "UTE Clinic",
+        "accountStatus": "ACTIVE",
+        "createdAt": 1704067200000,
+        "updatedAt": 1706745600000
+      }
+    ],
+    "pagination": { "total": 1, "page": 1, "limit": 20, "totalPages": 1 }
+  }
+}
+```
+
+Example Request:
+```http
+GET /api/admin/receptionists?page=1&limit=20&search=anna
+Authorization: Bearer <admin-access-token>
+```
+
 ## Doctors
 
 ### GET /doctors/active
