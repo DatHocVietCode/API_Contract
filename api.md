@@ -553,6 +553,9 @@ Response (Success):
 Notes:
 - The backend resolves the billing record first, then the linked patient, then fetches a sanitized wallet summary internally.
 - `maxApplicableDiscount` is optional and only returned when the billing workflow can compute the current coin discount cap.
+- Billing computes this cap from pre-wallet payable: `max(0, totalAmount - insuranceAmount - depositUsed)`.
+- Current Coin cap policy is `min(preWalletPayable, 30000, floor(preWalletPayable * 0.1))`.
+- The returned cap is an FE display/preview value, but the backend also enforces the same cap during apply, finalize, and first payment commit.
 - No wallet transaction history, ledger metadata, or reward details are exposed by this endpoint.
 
 ### GET /receptionist/billing/:visitId
@@ -620,6 +623,8 @@ Validation rules:
 - Billing `status` must be `DRAFT`
 - `creditToUse` must be <= remaining payable computed from stored base values (totalAmount, insuranceAmount, depositUsed, coinUsed)
 - Patient must have sufficient credit balance (checked, but not deducted)
+- Credit is money-equivalent wallet/refund balance. It has no percentage/fixed discount cap and may cover 100% of remaining payable.
+- Stored `creditUsed` is revalidated during finalize and first payment commit because medication fulfillment or wallet balance may change after apply.
 
 Response (Success):
 ```json
@@ -647,7 +652,10 @@ Validation rules:
 - `coinToUse` must be a number >= 0
 - Billing `status` must be `DRAFT`
 - `coinToUse` must be <= remaining payable after credit (computed from stored base values)
+- `coinToUse` must be <= current Coin discount cap: `min(preWalletPayable, 30000, floor(preWalletPayable * 0.1))`
 - Patient must have sufficient available coin balance (checked, but not deducted)
+- Coin is reward/discount value, not money-equivalent wallet credit.
+- Stored `coinUsed` is revalidated during finalize and first payment commit because medication fulfillment, the payable basis, or wallet balance may change after apply.
 
 Response (Success):
 ```json
@@ -661,6 +669,14 @@ Response (Success):
   }
 }
 ```
+
+Billing wallet validation error messages:
+- `creditToUse cannot exceed remaining payable (<amount>)`
+- `coinToUse cannot exceed remaining payable (<amount>)`
+- `coinToUse cannot exceed coin discount cap (<amount>)`
+- `Insufficient credit. Balance: <amount>`
+- `Insufficient coin. Balance: <amount>`
+- During finalize or first payment commit, stale stored values may be rejected as `creditUsed cannot exceed remaining payable after coin (<amount>)`, `coinUsed cannot exceed remaining payable after credit (<amount>)`, `coinUsed cannot exceed coin discount cap (<amount>)`, or an insufficient-balance error. FE should refresh the billing and wallet summary, then let the receptionist reapply wallet values.
 
 ### POST /receptionist/billings/:billingId/finalize
 Description: Finalize a billing with optional medication fulfillment adjustments. Receptionist confirms actual dispensed quantities and sources before finalization. Finalize locks the billing so pricing and applied discounts cannot be modified.
@@ -696,6 +712,10 @@ Validation rules:
   - `dispensedQty` must be >= 0
   - `source` must be one of: `CLINIC`, `OUTSIDE_PURCHASE`
 - `finalPayable` computed after fulfillment must be >= 0
+- Stored `creditUsed` must still be <= remaining payable after stored `coinUsed`
+- Stored `coinUsed` must still be <= remaining payable after stored `creditUsed`
+- Stored `coinUsed` must still be <= current Coin discount cap after fulfillment recalculation
+- Patient must still have sufficient available credit/coin for the stored wallet values
 
 Behavior:
 - Applies fulfillment changes to medications[] in billing:
@@ -707,6 +727,7 @@ Behavior:
 - Recomputes `medicationFee` as sum of all `lineTotal` values
 - Recomputes `totalAmount = consultationFee + medicationFee`
 - Recomputes `insuranceAmount` and `finalPayable` based on new `totalAmount`
+- Revalidates stored Coin/Credit values before creating the payment. If fulfillment lowers payable enough to invalidate existing wallet values, backend rejects finalization and FE should refresh/reapply wallet values.
 - Sets `billing.status = FINALIZED` (immutable snapshot)
 - Creates a payment record and prepares for payment flow
 - Idempotent: if already `FINALIZED`, returns success (no-op)
@@ -834,6 +855,8 @@ Params:
 - `paymentId`: string
 Behavior:
 - Idempotent: repeated calls on an already-committed payment return success without double-deducting wallets.
+- On the first successful commit, backend revalidates stored `creditUsed` and `coinUsed` against remaining payable, Coin cap, and available wallet balances before mutating wallets.
+- If validation fails, payment is not marked `SUCCESS` and wallet deductions are not created.
 Response (Success):
 ```json
 {
