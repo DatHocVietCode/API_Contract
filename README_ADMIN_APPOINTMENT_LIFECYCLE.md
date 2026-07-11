@@ -38,7 +38,7 @@ Filtered, paginated, **summarized** appointment list for the admin table.
 | `assignmentStatus` | enum | `NONE \| AWAITING_ASSIGNMENT \| ASSIGNED` |
 | `depositStatus` | enum | `NOT_REQUIRED \| PENDING \| PAID \| FAILED \| REFUNDED \| FORFEITED` |
 | `doctorId` | ObjectId | ignored if not a valid id |
-| `patientEmail` | string | exact match |
+| `patientEmail` | string | exact-match **filter input only** — no patient email is returned in the response (req-5 PII scoping) |
 | `dateFrom`,`dateTo` | epoch ms | filters `scheduledAt` |
 
 ### Response `data`
@@ -48,7 +48,7 @@ Filtered, paginated, **summarized** appointment list for the admin table.
   "items": [
     {
       "appointmentId": "string",
-      "patient": { "email": "p@e.com" } | null,
+      "patient": { "name": "Nguyễn B" } | null,
       "doctor": { "id": "string", "name": "string" } | null,
       "appointmentStatus": "CONFIRMED",
       "assignmentStatus": "NONE",
@@ -134,7 +134,6 @@ payloads only (no raw payloads / PII — fetch those lazily via endpoint 3).
 {
   "actorId": "string?",
   "actorName": "string?",
-  "actorEmail": "string?",
   "actorRole": "string?",
   "actorType": "USER | SYSTEM | UNKNOWN",
   "actorConfidence": "EXACT | ROLE_INFERRED | SYSTEM_INFERRED | UNKNOWN",
@@ -165,8 +164,9 @@ PAYMENT → SLOT → COMMUNICATION → CANCELLATION → RESCHEDULE → UNLINKED`
 
 - Group nodes by `phase` in the order above; order within a phase by `timestamp`
   (nodes with `timestamp: null` sink to the end of their phase).
-- Show actor by confidence: `EXACT` → name/email/role; `ROLE_INFERRED` →
+- Show actor by confidence: `EXACT` → name/role; `ROLE_INFERRED` →
   "Role (inferred)"; `SYSTEM_INFERRED` → "System"; `UNKNOWN` → "Unknown actor".
+  (Actor email is no longer returned — req-5 PII scoping.)
 - Render `globalWarnings` as a tree-level banner; per-node `warnings` as chips.
 - `reconstruction.partial = true` ⇒ show a "reconstructed from incomplete data" notice.
 - Never assume a phase exists; the tree can be useful while incomplete.
@@ -190,7 +190,8 @@ Lazy, **sanitized** per-node detail (loaded when an admin clicks a node).
 - Reconstructable-but-incomplete node → **200** with `complete: false` + a
   `NODE_DETAIL_INCOMPLETE` warning (never 500).
 - `domainSnapshot` is sanitized by default: sensitive patient fields
-  (phone/address/identity/insurance/DOB) are `"[redacted]"`; heavy clinical arrays
+  (phone/address/identity/insurance/DOB, **email/patient email**, and free-text
+  clinical fields **diagnosis/note**) are `"[redacted]"`; heavy clinical arrays
   (prescriptions/medications/vitalSigns/history…) are summarized to `{ count }`.
   Raw payloads are **not** exposed (deferred debug-only hardening).
 
@@ -205,7 +206,7 @@ Lazy, **sanitized** per-node detail (loaded when an admin clicks a node).
   "statusBefore": "IN_PROGRESS",
   "statusAfter": "COMPLETED",
   "actor": { /* ActorSummary */ },
-  "domainSnapshot": { "status": "COMPLETED", "completedAt": 1718600000000, "phone": "[redacted]" },
+  "domainSnapshot": { "status": "COMPLETED", "completedAt": 1718600000000, "phone": "[redacted]", "patientEmail": "[redacted]", "diagnosis": "[redacted]" },
   "sourceMeta": { "collection": "visits", "recordId": "<visitId>" },
   "warnings": [],
   "complete": true
