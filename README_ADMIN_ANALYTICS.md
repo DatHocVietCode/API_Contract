@@ -79,3 +79,65 @@ patient/account link does not resolve (a known data-integrity caveat); the endpo
   "items": [ { "accountId": "string", "name": "Vo Phan Tan Dat", "status": "ACTIVE", "examCount": 44 } ]
 }
 ```
+
+## 5. `GET /admin/analytics/revenue`
+
+Revenue (consultation + medication), by doctor and by specialty, plus two medication
+rankings. **All amounts are plain integer VND — there is no `currency` field and no
+decimals; do not treat them as cents.**
+
+**Base population — diverges from reqs 1/2/4:** revenue is computed exclusively from
+`Billing` records with **`status = 'PAID'`** (DRAFT/FINALIZED billings are excluded
+entirely). Consultation revenue is `Σ Billing.consultationFee`, **not**
+`examCount × 100,000` — this is an independent pipeline from `top-doctors`/
+`top-specialties` above and may rank doctors differently in principle, even though in
+current data the ordering happens to agree.
+
+**Time-window axis — also diverges:** windows on **`Billing.createdAt`** (a real Date
+field), not `Appointment.scheduledAt`. `createdAt` reflects when the billing **draft**
+was created (at visit completion), not when it was actually paid — there is no separate
+paid-at timestamp. Default is still the same **last-3-months** shape as reqs 1/2/4
+(`from`/`to` epoch ms override; `limit` applies to `byDoctor`, `bySpecialty`, and both
+medication rankings, same default/clamp as the other endpoints).
+
+Medication revenue only counts `medications[]` lines with `source = 'CLINIC'`
+(`Σ lineTotal`); `source = 'OUTSIDE_PURCHASE'` lines are never charged
+(`lineTotal` is always `0` by design) and are reported separately (below) as a
+frequency ranking, not a revenue one.
+
+`doctorsWithRevenueCount` / `specialtiesWithRevenueCount` are the **pre-limit** distinct
+counts of doctors/specialties with any PAID revenue — use them to detect when `byDoctor`/
+`bySpecialty` have been truncated by `limit`, not the returned array length. Doctors/
+specialties with no PAID billing simply do not appear (no zero rows, no error).
+
+```jsonc
+{
+  "window": { "from": 1710000000000, "to": 1717776000000 },
+  "totalConsultationRevenue": 1100000,
+  "totalMedicationRevenue": 630000,
+  "totalRevenue": 1730000,
+  "paidBillingCount": 11,
+  "doctorsWithRevenueCount": 2,
+  "specialtiesWithRevenueCount": 2,
+  "byDoctor": [
+    { "doctorId": "string", "doctorName": "BS. Nguyễn Đạt", "consultationRevenue": 1000000, "medicationRevenue": 485000, "revenue": 1485000, "billingCount": 10 }
+  ],
+  "bySpecialty": [
+    { "specialtyId": "string", "name": "Trung tâm tim mạch", "consultationRevenue": 1000000, "medicationRevenue": 485000, "revenue": 1485000, "billingCount": 10 }
+  ],
+  "topDispensedMedications": [
+    { "medicineId": "string|null", "medicineName": "Acemuc 200mg", "totalQty": 25, "lineCount": 4, "revenue": 225000 }
+  ],
+  "topExternalMedications": [
+    { "medicineId": "string|null", "medicineName": "string", "totalQty": 0, "lineCount": 0 }
+  ]
+}
+```
+
+- `topDispensedMedications` / `topExternalMedications` sort by **`totalQty` desc, then
+  `lineCount` desc**.
+- `topExternalMedications` items **omit `revenue`** (always 0 by design — see above).
+- `medicineId` is `null` when a line item has no catalog reference (`Medicine._id`);
+  grouping falls back to `medicineName` in that case.
+- `doctorName` / specialty `name` resolve the same way as endpoints 1–2 (`Doctor.profileId
+  → Profile.name`; `ChuyenKhoa.name`) and are `null` if the link doesn't resolve.
